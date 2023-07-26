@@ -212,6 +212,20 @@ impl NetcodeClient {
             return Err(NetcodeError::PayloadAboveLimit);
         }
 
+        match self.state {
+            ClientState::Connected => {
+                log::error!("ClientState::Connected")
+            }
+            ClientState::Disconnected(e) => {
+                log::error!("ClientState::Disconnected {e}")
+            }
+            ClientState::SendingConnectionRequest => {
+                log::error!("ClientState::SendingConnectionRequest")
+            }
+            ClientState::SendingConnectionResponse => {
+                log::error!("ClientState::SendingConnectionResponse")
+            }
+        }
         if self.state != ClientState::Connected {
             return Err(NetcodeError::ClientNotConnected);
         }

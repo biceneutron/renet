@@ -3,6 +3,8 @@ use std::{error, fmt, io};
 use crate::{token::TokenGenerationError, DisconnectReason, NETCODE_MAX_PAYLOAD_BYTES};
 use chacha20poly1305::aead::Error as CryptoError;
 
+use webrtc::error::Error as WebRTCError;
+
 /// Errors from the renetcode crate.
 #[derive(Debug)]
 pub enum NetcodeError {
@@ -38,6 +40,8 @@ pub enum NetcodeError {
     IoError(io::Error),
     /// An error occured while generating the connect token.
     TokenGenerationError(TokenGenerationError),
+    /// WebRTC error.
+    WebRTCError(WebRTCError),
 }
 
 impl fmt::Display for NetcodeError {
@@ -61,6 +65,7 @@ impl fmt::Display for NetcodeError {
             ClientNotConnected => write!(fmt, "client is disconnected or connecting"),
             IoError(ref err) => write!(fmt, "{}", err),
             TokenGenerationError(ref err) => write!(fmt, "{}", err),
+            WebRTCError(ref err) => write!(fmt, "{}", err),
         }
     }
 }
@@ -82,5 +87,11 @@ impl From<TokenGenerationError> for NetcodeError {
 impl From<CryptoError> for NetcodeError {
     fn from(_: CryptoError) -> Self {
         NetcodeError::CryptoError
+    }
+}
+
+impl From<WebRTCError> for NetcodeError {
+    fn from(inner: WebRTCError) -> Self {
+        NetcodeError::WebRTCError(inner)
     }
 }

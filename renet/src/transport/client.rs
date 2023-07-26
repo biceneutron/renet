@@ -12,6 +12,28 @@ use crate::remote_connection::RenetClient;
 
 use super::NetcodeTransportError;
 
+// webrtc
+use std::sync::Arc;
+use webrtc::{
+    api::{setting_engine::SettingEngine, APIBuilder},
+    data::data_channel::DataChannel,
+    data_channel::{data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage, RTCDataChannel},
+    dtls_transport::dtls_role::DTLSRole,
+    error::Error as RTCError,
+    ice::mdns::MulticastDnsMode,
+    ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
+    peer_connection::{
+        configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState, sdp::session_description::RTCSessionDescription,
+        RTCPeerConnection,
+    },
+    sdp::description::session::ATTR_KEY_CANDIDATE,
+};
+
+// for develop
+use bytes::Bytes;
+use std::fmt;
+use tokio::{sync::mpsc, time::sleep};
+
 /// Configuration to establish an secure ou unsecure connection with the server.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -31,16 +53,20 @@ pub enum ClientAuthentication {
     },
 }
 
-#[derive(Debug)]
+// #TODO deal with this trait
+// #[derive(Debug)]
 #[cfg_attr(feature = "bevy", derive(bevy_ecs::system::Resource))]
 pub struct NetcodeClientTransport {
     socket: UdpSocket,
     netcode_client: NetcodeClient,
     buffer: [u8; NETCODE_MAX_PACKET_BYTES],
+
+    peer_connection: Arc<RTCPeerConnection>,
+    data_channel: Arc<RTCDataChannel>,
 }
 
 impl NetcodeClientTransport {
-    pub fn new(current_time: Duration, authentication: ClientAuthentication, socket: UdpSocket) -> Result<Self, NetcodeError> {
+    pub async fn new(current_time: Duration, authentication: ClientAuthentication, socket: UdpSocket) -> Result<Self, NetcodeError> {
         socket.set_nonblocking(true)?;
         let connect_token: ConnectToken = match authentication {
             ClientAuthentication::Unsecure {
@@ -63,11 +89,172 @@ impl NetcodeClientTransport {
 
         let netcode_client = NetcodeClient::new(current_time, connect_token);
 
+        // webrtc
+        let mut setting_engine = SettingEngine::default();
+        setting_engine.set_srtp_protection_profiles(vec![]);
+        // setting_engine.detach_data_channels();
+        setting_engine.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+        setting_engine
+            .set_answering_dtls_role(DTLSRole::Client)
+            .expect("error in set_answering_dtls_role!");
+
+        // Create the API object with the MediaEngine
+        let api = APIBuilder::new().with_setting_engine(setting_engine).build();
+
+        // Prepare the configuration
+        let config = RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                // urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        let data_channel = peer_connection
+            .create_data_channel(
+                "data",
+                Some(RTCDataChannelInit {
+                    // ordered: Some(false),
+                    // max_retransmits: Some(1),
+                    // max_packet_life_time: Some(500),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("cannot create data channel");
+
+        peer_connection.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+            log::debug!("Peer Connection State has changed: {s}");
+            if s == RTCPeerConnectionState::Failed {
+                log::debug!("Peer Connection has gone to failed exiting");
+                // let _ = done_tx.try_send(());
+            }
+
+            Box::pin(async {})
+        }));
+        data_channel.on_error(Box::new(move |error| {
+            log::error!("data channel error: {:?}", error);
+            Box::pin(async {})
+        }));
+
+        let data_channel_ref_1 = Arc::clone(&data_channel);
+        data_channel.on_open(Box::new(move || {
+            println!(
+                "Data channel '{}'-'{}' open. Random messages will now be sent to any connected DataChannels every 2 seconds",
+                data_channel_ref_1.label(),
+                data_channel_ref_1.id()
+            );
+
+            // Box::pin(async move {})
+
+            let data_channel_ref_2 = Arc::clone(&data_channel_ref_1);
+            Box::pin(async move {
+                let mut result = Result::<usize, RTCError>::Ok(0);
+                let mut packet_seq = 0;
+                while result.is_ok() {
+                    let timeout = tokio::time::sleep(Duration::from_secs(2));
+                    tokio::pin!(timeout);
+
+                    tokio::select! {
+                        _ = timeout.as_mut() =>{
+                            let message = format!("CLIENT_PACKET_{}", packet_seq);
+                            println!("Sending '{message}'");
+                            // result = data_channel_ref_2.send_text(message).await.map_err(Into::into);
+                            result = data_channel_ref_2.send(&Bytes::from(message)).await.map_err(Into::into);
+                            packet_seq += 1;
+                        }
+                    };
+                }
+            })
+        }));
+
+        let d_label = data_channel.label().to_owned();
+        data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
+            let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
+            println!("Received from server, '{d_label}': {msg_str}");
+            Box::pin(async {})
+        }));
+
+        peer_connection.on_ice_candidate(Box::new(move |candidate_opt| {
+            if let Some(candidate) = &candidate_opt {
+                log::debug!("received ice candidate from: {}", candidate.address);
+            } else {
+                log::debug!("all local candidates received");
+            }
+
+            Box::pin(async {})
+        }));
+
         Ok(Self {
             buffer: [0u8; NETCODE_MAX_PACKET_BYTES],
             socket,
             netcode_client,
+            peer_connection,
+            data_channel,
         })
+    }
+
+    pub async fn create_offer(&self) -> io::Result<RTCSessionDescription> {
+        let offer = self.peer_connection.create_offer(None).await.expect("cannot create offer");
+        self.peer_connection
+            .set_local_description(offer)
+            .await
+            .expect("cannot set local description");
+        Ok(self.peer_connection.local_description().await.unwrap())
+
+        // Ok(String::new())
+    }
+
+    pub async fn set_answer(&self, answer: String) -> io::Result<()> {
+        let sdp = RTCSessionDescription::answer(answer).unwrap();
+
+        let parsed_sdp = match sdp.unmarshal() {
+            Ok(parsed) => {
+                // for mdsp in &parsed.media_descriptions {
+                //     for a in &mdsp.attributes {
+                //         println!("a.key {}", a.key);
+                //     }
+                // }
+                parsed
+            }
+            Err(e) => {
+                panic!("error unmarshaling answer sdp {}", e);
+            }
+        };
+
+        let mut candidate = Option::None;
+        if let Some(c) = parsed_sdp.attribute(ATTR_KEY_CANDIDATE) {
+            candidate = Some(c.to_owned());
+        } else {
+            for m_sdp in &parsed_sdp.media_descriptions {
+                if let Some(Some(c)) = m_sdp.attribute(ATTR_KEY_CANDIDATE) {
+                    candidate = Some(c.to_owned());
+                    break;
+                }
+            }
+            if candidate.is_none() {
+                panic!("error no candidate in answer sdp");
+            }
+        }
+
+        self.peer_connection
+            .set_remote_description(sdp)
+            .await
+            .expect("cannot set remote description");
+
+        // add ice candidate to connection
+        if let Err(error) = self
+            .peer_connection
+            // .add_ice_candidate(session_response.candidate.candidate)
+            .add_ice_candidate(RTCIceCandidateInit {
+                candidate: candidate.unwrap(),
+                ..Default::default()
+            })
+            .await
+        {
+            panic!("Error during add_ice_candidate: {:?}", error);
+        }
+        Ok(())
     }
 
     pub fn addr(&self) -> io::Result<SocketAddr> {
@@ -121,15 +308,24 @@ impl NetcodeClientTransport {
 
     /// Send packets to the server.
     /// Should be called every tick
-    pub fn send_packets(&mut self, connection: &mut RenetClient) -> Result<(), NetcodeTransportError> {
+    pub async fn send_packets(&mut self, connection: &mut RenetClient) -> Result<(), NetcodeTransportError> {
         if let Some(reason) = self.netcode_client.disconnect_reason() {
             return Err(NetcodeError::Disconnected(reason).into());
         }
+        // log::error!("here 0");
 
+        // let data_channel_ref_1 = Arc::clone(&self.data_channel);
         let packets = connection.get_packets_to_send();
+        // log::error!("here 1");
         for packet in packets {
             let (addr, payload) = self.netcode_client.generate_payload_packet(&packet)?;
-            self.socket.send_to(payload, addr)?;
+
+            // #TODO instead of `self.socket.send_to`, do `data_channel.send(&Bytes::from(message)).await.map_err(Into::into)`
+            // result = data_channel_ref_2.send(&Bytes::from(message)).await.map_err(Into::into);
+            // self.socket.send_to(payload, addr)?;
+            // log::error!("here 2");
+            self.data_channel.send(&Bytes::copy_from_slice(payload)).await?;
+            // .expect("data channel send should be ok")
         }
 
         Ok(())
@@ -153,6 +349,8 @@ impl NetcodeClientTransport {
         }
 
         loop {
+            // #TODO instead of `self.socket.recv_from`, read from mpsc channel. The `on_message` callback of the
+            // data channel receives WebRTC messages and writes the messages into the mpsc channel.
             let packet = match self.socket.recv_from(&mut self.buffer) {
                 Ok((len, addr)) => {
                     if addr != self.netcode_client.server_addr() {

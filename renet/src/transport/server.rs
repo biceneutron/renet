@@ -8,7 +8,15 @@ use renetcode::{NetcodeServer, ServerResult, NETCODE_KEY_BYTES, NETCODE_MAX_PACK
 
 use crate::server::RenetServer;
 
-use super::NetcodeTransportError;
+use super::{NetcodeTransportError, Str0mClient};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
+use str0m::channel::{ChannelData, ChannelId};
+use str0m::media::MediaKind;
+use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
+use str0m::Event;
+use str0m::{net::Receive, Candidate, IceConnectionState, Input, Output, Rtc, RtcError};
+// use systemstat::Ipv4Addr;
 
 /// Configuration to establish a secure or unsecure connection with the server.
 #[derive(Debug)]
@@ -46,6 +54,8 @@ pub struct NetcodeServerTransport {
     socket: UdpSocket,
     netcode_server: NetcodeServer,
     buffer: [u8; NETCODE_MAX_PACKET_BYTES],
+
+    str0m_clients: Vec<Str0mClient>,
 }
 
 impl NetcodeServerTransport {
@@ -70,6 +80,7 @@ impl NetcodeServerTransport {
             socket,
             netcode_server,
             buffer: [0; NETCODE_MAX_PACKET_BYTES],
+            str0m_clients: vec![],
         })
     }
 
@@ -118,6 +129,8 @@ impl NetcodeServerTransport {
     pub fn update(&mut self, duration: Duration, server: &mut RenetServer) -> Result<(), NetcodeTransportError> {
         self.netcode_server.update(duration);
 
+        self.str0m_clients.retain(|c| c.rtc.is_alive());
+
         loop {
             match self.socket.recv_from(&mut self.buffer) {
                 Ok((len, addr)) => {
@@ -163,6 +176,22 @@ impl NetcodeServerTransport {
                 }
             }
         }
+    }
+
+    pub fn spawn_new_client(&mut self, rx: &Receiver<Rtc>) {
+        // try_recv here won't lock up the thread.
+        match rx.try_recv() {
+            Ok(rtc) => {
+                let new_client = Str0mClient::new(rtc);
+                self.str0m_clients.push(new_client);
+            }
+            Err(TryRecvError::Empty) => {}
+            _ => panic!("Receiver<Rtc> disconnected"),
+        }
+    }
+
+    pub fn get_num_str0mclients(&self) -> usize {
+        self.str0m_clients.len()
     }
 }
 

@@ -9,6 +9,7 @@ edition = "2021"
 
 [dependencies]
 renet = { path = "../renet" }
+renetcode = { path = "../renetcode" }
 renet_visualizer = { path = "../renet_visualizer" }
 eframe = "0.22"
 serde = { version = "1.0", features = [ "derive" ] } 

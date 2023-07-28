@@ -17,7 +17,10 @@ use std::sync::Arc;
 use webrtc::{
     api::{setting_engine::SettingEngine, APIBuilder},
     data::data_channel::DataChannel,
-    data_channel::{data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage, RTCDataChannel},
+    data_channel::{
+        data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage, data_channel_state::RTCDataChannelState,
+        RTCDataChannel,
+    },
     dtls_transport::dtls_role::DTLSRole,
     error::Error as RTCError,
     ice::mdns::MulticastDnsMode,
@@ -124,7 +127,7 @@ impl NetcodeClientTransport {
             .expect("cannot create data channel");
 
         peer_connection.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-            log::debug!("Peer Connection State has changed: {s}");
+            log::info!("Peer Connection State has changed: {s}");
             if s == RTCPeerConnectionState::Failed {
                 log::debug!("Peer Connection has gone to failed exiting");
                 // let _ = done_tx.try_send(());
@@ -137,36 +140,36 @@ impl NetcodeClientTransport {
             Box::pin(async {})
         }));
 
-        let data_channel_ref_1 = Arc::clone(&data_channel);
-        data_channel.on_open(Box::new(move || {
-            println!(
-                "Data channel '{}'-'{}' open. Random messages will now be sent to any connected DataChannels every 2 seconds",
-                data_channel_ref_1.label(),
-                data_channel_ref_1.id()
-            );
+        // let data_channel_ref_1 = Arc::clone(&data_channel);
+        // data_channel.on_open(Box::new(move || {
+        //     println!(
+        //         "Data channel '{}'-'{}' open. Random messages will now be sent to any connected DataChannels every 2 seconds",
+        //         data_channel_ref_1.label(),
+        //         data_channel_ref_1.id()
+        //     );
 
-            // Box::pin(async move {})
+        //     // Box::pin(async move {})
 
-            let data_channel_ref_2 = Arc::clone(&data_channel_ref_1);
-            Box::pin(async move {
-                let mut result = Result::<usize, RTCError>::Ok(0);
-                let mut packet_seq = 0;
-                while result.is_ok() {
-                    let timeout = tokio::time::sleep(Duration::from_secs(2));
-                    tokio::pin!(timeout);
+        //     let data_channel_ref_2 = Arc::clone(&data_channel_ref_1);
+        //     Box::pin(async move {
+        //         let mut result = Result::<usize, RTCError>::Ok(0);
+        //         let mut packet_seq = 0;
+        //         while result.is_ok() {
+        //             let timeout = tokio::time::sleep(Duration::from_secs(2));
+        //             tokio::pin!(timeout);
 
-                    tokio::select! {
-                        _ = timeout.as_mut() =>{
-                            let message = format!("CLIENT_PACKET_{}", packet_seq);
-                            println!("Sending '{message}'");
-                            // result = data_channel_ref_2.send_text(message).await.map_err(Into::into);
-                            result = data_channel_ref_2.send(&Bytes::from(message)).await.map_err(Into::into);
-                            packet_seq += 1;
-                        }
-                    };
-                }
-            })
-        }));
+        //             tokio::select! {
+        //                 _ = timeout.as_mut() =>{
+        //                     let message = format!("CLIENT_PACKET_{}", packet_seq);
+        //                     println!("Sending '{message}'");
+        //                     // result = data_channel_ref_2.send_text(message).await.map_err(Into::into);
+        //                     result = data_channel_ref_2.send(&Bytes::from(message)).await.map_err(Into::into);
+        //                     packet_seq += 1;
+        //                 }
+        //             };
+        //         }
+        //     })
+        // }));
 
         let d_label = data_channel.label().to_owned();
         data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
@@ -293,6 +296,7 @@ impl NetcodeClientTransport {
 
         match self.netcode_client.disconnect() {
             Ok((addr, packet)) => {
+                println!("udp socket sending disconnect 2 {} bytes, to {:?}", packet.len(), addr);
                 if let Err(e) = self.socket.send_to(packet, addr) {
                     log::error!("Failed to send disconnect packet: {e}");
                 }
@@ -309,21 +313,24 @@ impl NetcodeClientTransport {
     /// Send packets to the server.
     /// Should be called every tick
     pub async fn send_packets(&mut self, connection: &mut RenetClient) -> Result<(), NetcodeTransportError> {
+        // log::error!("here 0");
         if let Some(reason) = self.netcode_client.disconnect_reason() {
             return Err(NetcodeError::Disconnected(reason).into());
         }
-        // log::error!("here 0");
+        // log::error!("here 1");
 
         // let data_channel_ref_1 = Arc::clone(&self.data_channel);
         let packets = connection.get_packets_to_send();
         // log::error!("here 1");
         for packet in packets {
+            // log::error!("here 2");
             let (addr, payload) = self.netcode_client.generate_payload_packet(&packet)?;
 
             // #TODO instead of `self.socket.send_to`, do `data_channel.send(&Bytes::from(message)).await.map_err(Into::into)`
             // result = data_channel_ref_2.send(&Bytes::from(message)).await.map_err(Into::into);
             // self.socket.send_to(payload, addr)?;
             // log::error!("here 2");
+            println!("send_packets: data channel sending {} bytes, to {:?}", payload.len(), addr);
             self.data_channel.send(&Bytes::copy_from_slice(payload)).await?;
             // .expect("data channel send should be ok")
         }
@@ -332,7 +339,7 @@ impl NetcodeClientTransport {
     }
 
     /// Advances the transport by the duration, and receive packets from the network.
-    pub fn update(&mut self, duration: Duration, client: &mut RenetClient) -> Result<(), NetcodeTransportError> {
+    pub async fn update(&mut self, duration: Duration, client: &mut RenetClient) -> Result<(), NetcodeTransportError> {
         if let Some(reason) = self.netcode_client.disconnect_reason() {
             // Mark the client as disconnected if an error occured in the transport layer
             if !client.is_disconnected() {
@@ -344,6 +351,7 @@ impl NetcodeClientTransport {
 
         if let Some(error) = client.disconnect_reason() {
             let (addr, disconnect_packet) = self.netcode_client.disconnect()?;
+            println!("udp socket sending disconnect 1 {} bytes, to {:?}", disconnect_packet.len(), addr);
             self.socket.send_to(disconnect_packet, addr)?;
             return Err(error.into());
         }
@@ -353,6 +361,8 @@ impl NetcodeClientTransport {
             // data channel receives WebRTC messages and writes the messages into the mpsc channel.
             let packet = match self.socket.recv_from(&mut self.buffer) {
                 Ok((len, addr)) => {
+                    println!("##### received a packet!!!!!");
+
                     if addr != self.netcode_client.server_addr() {
                         log::debug!("Discarded packet from unknown server {:?}", addr);
                         continue;
@@ -370,10 +380,18 @@ impl NetcodeClientTransport {
             }
         }
 
+        // if self.is_data_channel_open() {
         if let Some((packet, addr)) = self.netcode_client.update(duration) {
+            // println!("update: data channel sending {} bytes, to {:?}", packet.len(), addr);
             self.socket.send_to(packet, addr)?;
+            // self.data_channel.send(&Bytes::copy_from_slice(packet)).await?;
         }
+        // }
 
         Ok(())
+    }
+
+    pub fn is_data_channel_open(&self) -> bool {
+        self.data_channel.ready_state() == RTCDataChannelState::Open
     }
 }

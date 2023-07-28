@@ -190,6 +190,8 @@ impl SendChannelReliable {
             *packet_sequence += 1;
         }
 
+        println!("num of packets = {}", packets.len());
+
         packets
     }
 
@@ -200,8 +202,10 @@ impl SendChannelReliable {
 
         self.memory_usage_bytes += message.len();
         let unacked_message = if message.len() > SLICE_SIZE {
+            println!("message will be fragmented");
             UnackedMessage::new_sliced(message)
         } else {
+            println!("message is small");
             UnackedMessage::Small { message, last_sent: None }
         };
 

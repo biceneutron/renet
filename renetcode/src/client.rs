@@ -99,6 +99,12 @@ impl NetcodeClient {
     }
 
     pub fn is_connected(&self) -> bool {
+        if self.state == ClientState::SendingConnectionRequest {
+            println!("ClientState SendingConnectionRequest");
+        } else if self.state == ClientState::SendingConnectionResponse {
+            println!("ClientState SendingConnectionResponse");
+        }
+
         self.state == ClientState::Connected
     }
 
@@ -212,20 +218,20 @@ impl NetcodeClient {
             return Err(NetcodeError::PayloadAboveLimit);
         }
 
-        match self.state {
-            ClientState::Connected => {
-                log::error!("ClientState::Connected")
-            }
-            ClientState::Disconnected(e) => {
-                log::error!("ClientState::Disconnected {e}")
-            }
-            ClientState::SendingConnectionRequest => {
-                log::error!("ClientState::SendingConnectionRequest")
-            }
-            ClientState::SendingConnectionResponse => {
-                log::error!("ClientState::SendingConnectionResponse")
-            }
-        }
+        // match self.state {
+        //     ClientState::Connected => {
+        //         log::error!("ClientState::Connected")
+        //     }
+        //     ClientState::Disconnected(e) => {
+        //         log::error!("ClientState::Disconnected {e}")
+        //     }
+        //     ClientState::SendingConnectionRequest => {
+        //         log::error!("ClientState::SendingConnectionRequest")
+        //     }
+        //     ClientState::SendingConnectionResponse => {
+        //         log::error!("ClientState::SendingConnectionResponse")
+        //     }
+        // }
         if self.state != ClientState::Connected {
             return Err(NetcodeError::ClientNotConnected);
         }
@@ -341,6 +347,7 @@ impl NetcodeClient {
         match result {
             Err(_) => None,
             Ok(encoded) => {
+                println!("encoded {}", encoded);
                 self.sequence += 1;
                 Some((&mut self.out[..encoded], self.server_addr))
             }

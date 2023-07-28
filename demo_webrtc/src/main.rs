@@ -28,9 +28,12 @@ use webrtc::{
     sdp::description::session::ATTR_KEY_CANDIDATE,
 };
 
+const PROTOCOL_ID: u64 = 7;
+const NETCODE_USER_DATA_BYTES: usize = 256;
+
 #[tokio::main]
 async fn main() -> Result<(), RTCError> {
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
     let args: Vec<String> = std::env::args().collect();
     let exec_type = &args[1];
@@ -55,36 +58,29 @@ async fn main() -> Result<(), RTCError> {
 
     let mut client = RenetClient::new(ConnectionConfig::default());
 
-    const SERVER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3952);
+    const SERVER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1111);
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let client_id: u64 = 0;
+    let username = Username("Nick".to_string());
     let authentication = ClientAuthentication::Unsecure {
         server_addr: SERVER_ADDR,
         client_id,
-        user_data: None,
-        protocol_id: 0,
+        user_data: Some(username.to_netcode_user_data()),
+        protocol_id: PROTOCOL_ID,
     };
 
     let mut transport = NetcodeClientTransport::new(current_time, authentication, socket).await.unwrap();
     let offer = transport.create_offer().await.expect("offer creation failed");
 
-    let payload = match serde_json::to_string(&offer) {
-        Ok(p) => p,
-        Err(err) => panic!("{}", err),
-    };
-
     let http_client = HttpClient::new();
     let response: HttpResponse = loop {
-        // let request = http_client
-        //     .post(server_url.clone())
-        //     .header("Content-Length", offer.len())
-        //     .body(offer.clone());
-
         let request = http_client
             .post(server_url.clone())
-            .header("content-type", "application/json; charset=utf-8")
-            .body(payload.clone());
+            // .header("content-type", "application/json; charset=utf-8")
+            // .body(payload.clone());
+            .header("Content-Length", offer.sdp.len())
+            .body(offer.sdp.clone());
 
         match request.send().await {
             Ok(resp) => {
@@ -102,19 +98,20 @@ async fn main() -> Result<(), RTCError> {
 
     println!("#### Renet transport layer built");
 
-    log::debug!("transport.is_connected {}", transport.is_connected());
-    log::debug!("transport.is_connecting {}", transport.is_connecting());
-    log::debug!("transport.is_disconnected {}", transport.is_disconnected());
-
-    loop {}
+    // loop {}
 
     let mut packet_seq = 0;
     loop {
+        // log::debug!("transport.is_connected {}", transport.is_connected());
+        // log::debug!("transport.is_connecting {}", transport.is_connecting());
+        // log::debug!("transport.is_disconnected {}", transport.is_disconnected());
+
         let delta_time = Duration::from_millis(16);
         // Receive new messages and update client
         client.update(delta_time);
         transport
             .update(delta_time, &mut client)
+            .await
             .map_err(|e| log::error!("transport update error {e}"))
             .unwrap();
 
@@ -127,7 +124,7 @@ async fn main() -> Result<(), RTCError> {
             }
 
             // Send message
-            if packet_seq % 100 == 0 {
+            if packet_seq == 0 {
                 let message = format!("CLIENT_PACKET_{}", packet_seq);
                 println!("Sending '{message}'");
                 client.send_message(DefaultChannel::ReliableOrdered, message.as_bytes().to_vec());
@@ -136,202 +133,40 @@ async fn main() -> Result<(), RTCError> {
         }
 
         // Send packets to server
-        match transport.send_packets(&mut client).await {
-            Ok(()) => {}
-            Err(e) => {
-                println!("sending error {e}")
-            }
-        };
+        if transport.is_data_channel_open() {
+            match transport.send_packets(&mut client).await {
+                Ok(()) => {}
+                Err(e) => {
+                    println!("sending error {e}")
+                }
+            };
+        }
+
         thread::sleep(Duration::from_millis(50));
     }
-
-    // let timeout = tokio::time::sleep(Duration::from_secs(5));
-    // tokio::pin!(timeout);
-
-    // tokio::select! {
-    //     _ = timeout.as_mut() =>{
-    //         let mut packet_seq = 0;
-    //         loop {
-    //             let delta_time = Duration::from_millis(16);
-    //             // Receive new messages and update client
-    //             client.update(delta_time);
-    //             transport.update(delta_time, &mut client).map_err(|e| log::error!("transport update error {e}")).unwrap();
-
-    //             if let Some(e) = client.disconnect_reason() {
-    //                 log::error!("{}", e);
-    //             } else {
-    //                 // Receive message from server
-    //                 while let Some(message) = client.receive_message(DefaultChannel::ReliableOrdered) {
-    //                     // Handle received message
-    //                     let msg_str = String::from_utf8(message.to_vec()).expect("received message should be parsable");
-    //                     println!("Received from server: {msg_str}");
-    //                 }
-
-    //                 // Send message
-    //                 if packet_seq % 100 == 0 {
-    //                     let message = format!("CLIENT_PACKET_{}", packet_seq);
-    //                     println!("Sending '{message}'");
-    //                     client.send_message(DefaultChannel::ReliableOrdered, message.as_bytes().to_vec());
-    //                 }
-    //                 packet_seq += 1;
-    //             }
-
-    //             // Send packets to server
-    //             match transport.send_packets(&mut client).await {
-    //                 Ok(()) => {},
-    //                 Err(e) => {println!("sending error {e}")}
-    //             };
-    //         }
-    //     }
-    // };
 }
 
-// fn create_renet_client(username: String, server_addr: SocketAddr) -> (RenetClient, NetcodeClientTransport) {
-//     let connection_config = ConnectionConfig::default();
-//     let client = RenetClient::new(connection_config);
+struct Username(String);
 
-//     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-//     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-//     let client_id = current_time.as_millis() as u64;
-//     let authentication = ClientAuthentication::Unsecure {
-//         server_addr,
-//         client_id,
-//         user_data: Some(Username(username).to_netcode_user_data()),
-//         protocol_id: PROTOCOL_ID,
-//     };
-
-//     let transport = NetcodeClientTransport::new(current_time, authentication, socket).unwrap();
-
-//     (client, transport)
-// }
-
-const MESSAGE_SIZE: usize = 1500;
-
-// async fn read_loop(
-//     data_channel: Arc<DataChannel>,
-//     to_client_sender: mpsc::UnboundedSender<Box<[u8]>>,
-// ) -> Result<(), RTCError> {
-//     let mut buffer = vec![0u8; MESSAGE_SIZE];
-//     loop {
-//         let message_length = match data_channel.read(&mut buffer).await {
-//             Ok(length) => length,
-//             Err(err) => {
-//                 println!("Datachannel closed; Exit the read_loop: {}", err);
-//                 return Ok(());
-//             }
-//         };
-
-//         match to_client_sender.send(buffer[..message_length].into()) {
-//             Ok(_) => {}
-//             Err(e) => {
-//                 return Err(RTCError::new(e.to_string()));
-//             }
-//         }
-//     }
-// }
-
-use std::str;
-async fn read_loop(data_channel: Arc<DataChannel>, to_client_sender: mpsc::UnboundedSender<Box<[u8]>>) -> Result<(), RTCError> {
-    let mut buffer = vec![0u8; MESSAGE_SIZE];
-    loop {
-        println!("#### read_loop ####");
-        let message_length = match data_channel.read(&mut buffer).await {
-            Ok(length) => length,
-            Err(err) => {
-                println!("Datachannel closed; Exit the read_loop: {}", err);
-                return Ok(());
-            }
-        };
-
-        if let Ok(message) = String::from_utf8(buffer[..message_length].to_vec()) {
-            println!("Received from server, {} bytes: {}", message_length, message);
-        } else {
-            println!("Received from server, {} bytes, but cannot parse it", message_length);
+impl Username {
+    fn to_netcode_user_data(&self) -> [u8; NETCODE_USER_DATA_BYTES] {
+        let mut user_data = [0u8; NETCODE_USER_DATA_BYTES];
+        if self.0.len() > NETCODE_USER_DATA_BYTES - 8 {
+            panic!("Username is too big");
         }
+        user_data[0..8].copy_from_slice(&(self.0.len() as u64).to_le_bytes());
+        user_data[8..self.0.len() + 8].copy_from_slice(self.0.as_bytes());
+
+        user_data
     }
-    println!("#### end read_loop ####");
-}
 
-// write_loop shows how to write to the datachannel directly
-// async fn write_loop(
-//     data_channel: Arc<DataChannel>,
-//     mut to_server_receiver: mpsc::UnboundedReceiver<Box<[u8]>>,
-// ) -> Result<(), RTCError> {
-//     loop {
-//         if let Some(write_message) = to_server_receiver.recv().await {
-//             match data_channel.write(&Bytes::from(write_message)).await {
-//                 Ok(_) => {}
-//                 Err(e) => {
-//                     return Err(RTCError::new(e.to_string()));
-//                 }
-//             }
-//         } else {
-//             return Ok(());
-//         }
-//     }
-// }
-
-async fn write_loop(data_channel: Arc<DataChannel>, mut to_server_receiver: mpsc::UnboundedReceiver<Box<[u8]>>) -> Result<(), RTCError> {
-    let mut packet_seq = 0;
-    loop {
-        println!("#### write_loop ####");
-        if packet_seq < 10 {
-            match data_channel.write(&Bytes::from("CLIENT_PACKET")).await {
-                Ok(_) => {
-                    packet_seq += 1;
-                }
-                Err(e) => {
-                    return Err(RTCError::new(e.to_string()));
-                }
-            }
-        } else {
-            return Ok(());
-        }
-    }
-    println!("#### write_loop ####");
-}
-
-struct SessionAnswer {
-    pub sdp: String,
-    pub type_str: String,
-}
-
-struct SessionCandidate {
-    pub candidate: String,
-    pub sdp_m_line_index: u16,
-    pub sdp_mid: String,
-}
-
-struct JsSessionResponse {
-    pub(crate) answer: SessionAnswer,
-    pub(crate) candidate: SessionCandidate,
-}
-
-use tinyjson::JsonValue;
-fn get_session_response(input: &str) -> JsSessionResponse {
-    let json_obj: JsonValue = input.parse().unwrap();
-
-    let sdp_opt: Option<&String> = json_obj["answer"]["sdp"].get();
-    let sdp: String = sdp_opt.unwrap().clone();
-
-    let type_str_opt: Option<&String> = json_obj["answer"]["type"].get();
-    let type_str: String = type_str_opt.unwrap().clone();
-
-    let candidate_opt: Option<&String> = json_obj["candidate"]["candidate"].get();
-    let candidate: String = candidate_opt.unwrap().clone();
-
-    let sdp_m_line_index_opt: Option<&f64> = json_obj["candidate"]["sdpMLineIndex"].get();
-    let sdp_m_line_index: u16 = *(sdp_m_line_index_opt.unwrap()) as u16;
-
-    let sdp_mid_opt: Option<&String> = json_obj["candidate"]["sdpMid"].get();
-    let sdp_mid: String = sdp_mid_opt.unwrap().clone();
-
-    JsSessionResponse {
-        answer: SessionAnswer { sdp, type_str },
-        candidate: SessionCandidate {
-            candidate,
-            sdp_m_line_index,
-            sdp_mid,
-        },
+    fn from_user_data(user_data: &[u8; NETCODE_USER_DATA_BYTES]) -> Self {
+        let mut buffer = [0u8; 8];
+        buffer.copy_from_slice(&user_data[0..8]);
+        let mut len = u64::from_le_bytes(buffer) as usize;
+        len = len.min(NETCODE_USER_DATA_BYTES - 8);
+        let data = user_data[8..len + 8].to_vec();
+        let username = String::from_utf8(data).unwrap();
+        Self(username)
     }
 }

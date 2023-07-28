@@ -89,7 +89,7 @@ fn server(public_addr: SocketAddr) {
     let mut transport = NetcodeServerTransport::new(current_time, server_config, socket).unwrap();
 
     let mut usernames: HashMap<u64, String> = HashMap::new();
-    let mut received_messages = vec![];
+    // let mut received_messages = vec![];
     let mut last_updated = Instant::now();
 
     let (tx, rx) = mpsc::sync_channel(1);
@@ -111,7 +111,7 @@ fn server(public_addr: SocketAddr) {
     });
 
     loop {
-        println!("#### num of str0m clients: {}", transport.get_num_str0mclients());
+        // println!("#### num of str0m clients: {}", transport.get_num_str0mclients());
 
         let now = Instant::now();
         let duration = now - last_updated;
@@ -120,9 +120,9 @@ fn server(public_addr: SocketAddr) {
         transport.spawn_new_client(&rx);
 
         server.update(duration);
-        transport.update(duration, &mut server).unwrap();
+        transport.update(duration, &mut server).unwrap(); // receive msg
 
-        received_messages.clear();
+        // received_messages.clear();
 
         while let Some(event) = server.get_event() {
             match event {
@@ -139,21 +139,22 @@ fn server(public_addr: SocketAddr) {
             }
         }
 
+        // custom logic
         for client_id in server.clients_id() {
             while let Some(message) = server.receive_message(client_id, DefaultChannel::ReliableOrdered) {
                 let text = String::from_utf8(message.into()).unwrap();
                 let username = usernames.get(&client_id).unwrap();
                 println!("Client {} ({}) sent text: {}", username, client_id, text);
-                let text = format!("{}: {}", username, text);
-                received_messages.push(text);
+                // let text = format!("{}: {}", username, text);
+                // received_messages.push(text);
             }
         }
 
-        for text in received_messages.iter() {
-            server.broadcast_message(DefaultChannel::ReliableOrdered, text.as_bytes().to_vec());
-        }
+        // for text in received_messages.iter() {
+        //     server.broadcast_message(DefaultChannel::ReliableOrdered, text.as_bytes().to_vec());
+        // }
 
-        transport.send_packets(&mut server);
+        // transport.send_packets(&mut server);
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -172,6 +173,8 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Resp
     if let Some(e) = data.read_to_string(&mut req_data).err() {
         panic!("error parsing HTTP request {}", e);
     }
+
+    println!("offer sdp {}", req_data);
 
     let offer = match SdpOffer::from_sdp_string(&req_data) {
         Ok(o) => o,
@@ -203,50 +206,6 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Resp
     // Response::from_data("application/json", body)
     Response::text(body)
 }
-
-// fn client(server_addr: SocketAddr, username: Username) {
-//     let connection_config = ConnectionConfig::default();
-//     let mut client = RenetClient::new(connection_config);
-
-//     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-//     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-//     let client_id = current_time.as_millis() as u64;
-//     let authentication = ClientAuthentication::Unsecure {
-//         server_addr,
-//         client_id,
-//         user_data: Some(username.to_netcode_user_data()),
-//         protocol_id: PROTOCOL_ID,
-//     };
-
-//     let mut transport = NetcodeClientTransport::new(current_time, authentication, socket).unwrap();
-//     let stdin_channel: Receiver<String> = spawn_stdin_channel();
-
-//     let mut last_updated = Instant::now();
-//     loop {
-//         let now = Instant::now();
-//         let duration = now - last_updated;
-//         last_updated = now;
-
-//         client.update(duration);
-//         transport.update(duration, &mut client).unwrap();
-
-//         if transport.is_connected() {
-//             match stdin_channel.try_recv() {
-//                 Ok(text) => client.send_message(DefaultChannel::ReliableOrdered, text.as_bytes().to_vec()),
-//                 Err(TryRecvError::Empty) => {}
-//                 Err(TryRecvError::Disconnected) => panic!("Channel disconnected"),
-//             }
-
-//             while let Some(text) = client.receive_message(DefaultChannel::ReliableOrdered) {
-//                 let text = String::from_utf8(text.into()).unwrap();
-//                 println!("{}", text);
-//             }
-//         }
-
-//         transport.send_packets(&mut client).unwrap();
-//         thread::sleep(Duration::from_millis(50));
-//     }
-// }
 
 fn spawn_stdin_channel() -> Receiver<String> {
     let (tx, rx) = mpsc::channel::<String>();

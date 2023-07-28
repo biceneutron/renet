@@ -160,15 +160,15 @@ impl Str0mClient {
         }
     }
 
-    fn poll_output(&mut self, socket: &UdpSocket) -> Propagated {
+    fn poll_output(&mut self, socket: &UdpSocket) -> (Propagated, Option<Vec<u8>>) {
         if !self.rtc.is_alive() {
-            return Propagated::Noop;
+            return (Propagated::Noop, None);
         }
 
         // Incoming tracks from other clients cause new entries in track_out that
         // need SDP negotiation with the remote peer.
         if self.negotiate_if_needed() {
-            return Propagated::Noop;
+            return (Propagated::Noop, None);
         }
 
         match self.rtc.poll_output() {
@@ -176,12 +176,12 @@ impl Str0mClient {
             Err(e) => {
                 log::warn!("Client ({}) poll_output failed: {:?}", *self.id, e);
                 self.rtc.disconnect();
-                Propagated::Noop
+                (Propagated::Noop, None)
             }
         }
     }
 
-    fn handle_output(&mut self, output: Output, socket: &UdpSocket) -> Propagated {
+    fn handle_output(&mut self, output: Output, socket: &UdpSocket) -> (Propagated, Option<Vec<u8>>) {
         match output {
             Output::Transmit(transmit) => {
                 // println!(
@@ -195,68 +195,70 @@ impl Str0mClient {
                     .send_to(&transmit.contents, transmit.destination)
                     // .send_to(data, transmit.destination)
                     .expect("sending UDP data");
-                Propagated::Noop
+                (Propagated::Noop, None)
             }
             Output::Timeout(t) => {
                 // println!("handle_output Output::Timeout");
-                Propagated::Timeout(t)
+                (Propagated::Timeout(t), None)
             }
             Output::Event(e) => match e {
                 Event::IceConnectionStateChange(v) => {
-                    println!("handle_output Output::Event::IceConnectionStateChange");
+                    println!("handle_output Output::Event::IceConnectionStateChange {}", v as u8);
                     if v == IceConnectionState::Disconnected {
                         // Ice disconnect could result in trying to establish a new connection,
                         // but this impl just disconnects directly.
                         self.rtc.disconnect();
                     }
-                    Propagated::Noop
+                    (Propagated::Noop, None)
                 }
-                Event::MediaAdded(e) => {
-                    println!("handle_output Output::Event::MediaAdded");
-                    self.handle_media_added(e.mid, e.kind)
-                }
-                Event::MediaData(data) => {
-                    println!("handle_output Output::Event::MediaData");
-                    Propagated::MediaData(self.id, data)
-                }
-                Event::KeyframeRequest(req) => {
-                    println!("handle_output Output::Event::KeyframeRequest");
-                    self.handle_incoming_keyframe_req(req)
-                }
+                // Event::MediaAdded(e) => {
+                //     println!("handle_output Output::Event::MediaAdded");
+                //     self.handle_media_added(e.mid, e.kind)
+                // }
+                // Event::MediaData(data) => {
+                //     println!("handle_output Output::Event::MediaData");
+                //     Propagated::MediaData(self.id, data)
+                // }
+                // Event::KeyframeRequest(req) => {
+                //     println!("handle_output Output::Event::KeyframeRequest");
+                //     self.handle_incoming_keyframe_req(req)
+                // }
                 Event::ChannelOpen(cid, _) => {
                     println!("handle_output Output::Event::ChannelOpen");
                     self.cid = Some(cid);
-                    Propagated::Noop
+                    (Propagated::Noop, None)
                 }
                 Event::ChannelData(data) => {
                     println!("handle_output Output::Event::ChannelData");
                     println!(
-                        "binary: {}, user data: {}",
-                        data.binary,
-                        String::from_utf8(data.data.clone()).unwrap()
+                        "length: {}, user data: {}",
+                        data.data.len(),
+                        String::from_utf8(data.data.clone()).unwrap_or("Cannot be parsed to string".to_string())
                     );
-                    self.handle_channel_data(data)
+
+                    (Propagated::Noop, Some(data.data))
+                    // self.handle_channel_data(data)
                 }
 
                 // NB: To see statistics, uncomment set_stats_interval() above.
                 Event::MediaIngressStats(data) => {
                     println!("handle_output Output::Event::MediaIngressStats");
                     log::info!("{:?}", data);
-                    Propagated::Noop
+                    (Propagated::Noop, None)
                 }
                 Event::MediaEgressStats(data) => {
                     println!("handle_output Output::Event::MediaEgressStats");
                     log::info!("{:?}", data);
-                    Propagated::Noop
+                    (Propagated::Noop, None)
                 }
                 Event::PeerStats(data) => {
                     println!("handle_output Output::Event::PeerStats");
                     log::info!("{:?}", data);
-                    Propagated::Noop
+                    (Propagated::Noop, None)
                 }
                 _ => {
                     println!("handle_output Output::Event:: others");
-                    Propagated::Noop
+                    (Propagated::Noop, None)
                 }
             },
         }
@@ -345,7 +347,7 @@ impl Str0mClient {
         // String::from_utf8(d.data.clone()).unwrap_or(String::new()).split();
 
         // let json = serde_json::to_string(&answer).unwrap();
-        channel.write(false, &d.data).expect("to write answer");
+        // channel.write(false, &d.data).expect("to write answer");
 
         Propagated::Noop
     }
@@ -441,6 +443,10 @@ impl Str0mClient {
             // This can fail if the rid doesn't match any media.
             log::info!("request_keyframe failed: {:?}", e);
         }
+    }
+
+    pub fn show_send_addr(&self) {
+        self.rtc.show_send_addr();
     }
 }
 

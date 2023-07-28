@@ -8,15 +8,15 @@ use renetcode::{NetcodeServer, ServerResult, NETCODE_KEY_BYTES, NETCODE_MAX_PACK
 
 use crate::server::RenetServer;
 
-use super::{NetcodeTransportError, Str0mClient};
+use super::{NetcodeTransportError, Propagated, Str0mClient};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::time::Instant;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelData, ChannelId};
 use str0m::media::MediaKind;
 use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
 use str0m::Event;
 use str0m::{net::Receive, Candidate, IceConnectionState, Input, Output, Rtc, RtcError};
-// use systemstat::Ipv4Addr;
 
 /// Configuration to establish a secure or unsecure connection with the server.
 #[derive(Debug)]
@@ -132,9 +132,67 @@ impl NetcodeServerTransport {
         self.str0m_clients.retain(|c| c.rtc.is_alive());
 
         loop {
+            // str0m handing output events
+            // Poll all clients, and get propagated events as a result.
+            let mut channel_data = vec![];
+            let to_propagate: Vec<_> = self
+                .str0m_clients
+                .iter_mut()
+                .map(|c| {
+                    c.show_send_addr();
+
+                    let (propagated, maybe_data) = c.poll_output(&self.socket);
+                    if let Some(data) = maybe_data {
+                        channel_data.push(data);
+                    }
+                    propagated
+                })
+                .collect();
+            let timeouts: Vec<_> = to_propagate.iter().filter_map(|p| p.as_timeout()).collect();
+
+            // We keep propagating client events until all clients respond with a timeout.
+            if to_propagate.len() > timeouts.len() {
+                propagate(&mut self.str0m_clients, to_propagate);
+                // Start over to propagate more client data until all are timeouts.
+                continue;
+            }
+
+            // str0m reads from socket
+            // if let Some(input) = read_socket_input(&self.socket, &mut self.buffer) {
+            //     if let Some(client) = self.str0m_clients.iter_mut().find(|c| c.accepts(&input)) {
+            //         client.handle_input(input);
+            //     } else {
+            //         // This is quite common because we don't get the Rtc instance via the mpsc channel
+            //         // quickly enough before the browser send the first STUN.
+            //         log::debug!("No client accepts UDP input: {:?}", input);
+            //     }
+            // }
+
             match self.socket.recv_from(&mut self.buffer) {
-                Ok((len, addr)) => {
-                    let server_result = self.netcode_server.process_packet(addr, &mut self.buffer[..len]);
+                Ok((len, source)) => {
+                    // str0m
+                    let buf = self.buffer.clone();
+                    if let Ok(contents) = buf[..len].try_into() {
+                        println!("udp socket received {} bytes, from {:?}, handled by str0m", len, source);
+                        let input = Input::Receive(
+                            Instant::now(),
+                            Receive {
+                                source,
+                                destination: self.socket.local_addr().unwrap(),
+                                contents,
+                            },
+                        );
+
+                        if let Some(client) = self.str0m_clients.iter_mut().find(|c| c.accepts(&input)) {
+                            client.handle_input(input);
+                        } else {
+                            log::debug!("No client accepts UDP input: {:?}", input);
+                        }
+                    }
+
+                    // renet
+                    println!("udp socket received {} bytes, from {:?}, handled by renet", len, source);
+                    let server_result = self.netcode_server.process_packet(source, &mut self.buffer[..len]);
                     handle_server_result(server_result, &self.socket, server);
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -152,6 +210,13 @@ impl NetcodeServerTransport {
         for disconnection_id in server.disconnections_id() {
             let server_result = self.netcode_server.disconnect(disconnection_id);
             handle_server_result(server_result, &self.socket, server);
+        }
+
+        // str0m
+        // Drive time forward in all clients.
+        let now = Instant::now();
+        for client in &mut self.str0m_clients {
+            client.handle_input(Input::Timeout(now));
         }
 
         Ok(())
@@ -197,6 +262,7 @@ impl NetcodeServerTransport {
 
 fn handle_server_result(server_result: ServerResult, socket: &UdpSocket, reliable_server: &mut RenetServer) {
     let send_packet = |packet: &[u8], addr: SocketAddr| {
+        println!("udp socket sending {} bytes, to {:?}", packet.len(), addr);
         if let Err(err) = socket.send_to(packet, addr) {
             log::error!("Failed to send packet to {addr}: {err}");
         }
@@ -205,9 +271,11 @@ fn handle_server_result(server_result: ServerResult, socket: &UdpSocket, reliabl
     match server_result {
         ServerResult::None => {}
         ServerResult::PacketToSend { payload, addr } => {
+            println!("Handling ServerResult::PacketToSend");
             send_packet(payload, addr);
         }
         ServerResult::Payload { client_id, payload } => {
+            println!("Handling ServerResult::Payload");
             if let Err(e) = reliable_server.process_packet_from(payload, client_id) {
                 log::error!("Error while processing payload for {}: {}", client_id, e);
             }
@@ -218,14 +286,81 @@ fn handle_server_result(server_result: ServerResult, socket: &UdpSocket, reliabl
             addr,
             payload,
         } => {
+            println!("Handling ServerResult::ClientConnected");
             reliable_server.add_connection(client_id);
             send_packet(payload, addr);
         }
         ServerResult::ClientDisconnected { client_id, addr, payload } => {
+            println!("Handling ServerResult::ClientDisconnected");
             reliable_server.remove_connection(client_id);
             if let Some(payload) = payload {
                 send_packet(payload, addr);
             }
         }
+    }
+}
+
+fn propagate(clients: &mut [Str0mClient], to_propagate: Vec<Propagated>) {
+    for p in to_propagate {
+        let Some(client_id) = p.client_id() else {
+            // If the event doesn't have a client id, it can't be propagated,
+            // (it's either a noop or a timeout).
+            continue;
+        };
+
+        for client in &mut *clients {
+            if client.id == client_id {
+                // Do not propagate to originating client.
+                continue;
+            }
+
+            match &p {
+                Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
+                Propagated::MediaData(_, data) => client.handle_media_data(client_id, data),
+                Propagated::KeyframeRequest(_, req, origin, mid_in) => {
+                    // Only one origin client handles the keyframe request.
+                    if *origin == client.id {
+                        client.handle_keyframe_request(*req, *mid_in)
+                    }
+                }
+                Propagated::Noop | Propagated::Timeout(_) => {}
+            }
+        }
+    }
+}
+
+fn read_socket_input<'a>(socket: &UdpSocket, buf: &'a mut [u8]) -> Option<Input<'a>> {
+    // buf.resize(2000, 0);
+
+    match socket.recv_from(buf) {
+        Ok((n, source)) => {
+            // buf.truncate(n);
+
+            // println!(
+            //     "received {}",
+            //     String::from_utf8(buf.clone()).unwrap_or("".to_string())
+            // );
+
+            // Parse data to a DatagramRecv, which help preparse network data to
+            // figure out the multiplexing of all protocols on one UDP port.
+            let Ok(contents) = buf[..n].try_into() else {
+                return None;
+            };
+
+            return Some(Input::Receive(
+                Instant::now(),
+                Receive {
+                    source,
+                    destination: socket.local_addr().unwrap(),
+                    contents,
+                },
+            ));
+        }
+
+        Err(e) => match e.kind() {
+            // Expected error for set_read_timeout(). One for windows, one for the rest.
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => None,
+            _ => panic!("UdpSocket read failed: {e:?}"),
+        },
     }
 }

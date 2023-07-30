@@ -8,7 +8,8 @@ use std::{
 
 use renet::{
     transport::{
-        ClientAuthentication, NetcodeClientTransport, NetcodeServerTransport, ServerAuthentication, ServerConfig, NETCODE_USER_DATA_BYTES,
+        ClientAuthentication, ICERequest, NetcodeClientTransport, NetcodeServerTransport, ServerAuthentication, ServerConfig,
+        NETCODE_USER_DATA_BYTES,
     },
     ConnectionConfig, DefaultChannel, RenetClient, RenetServer, ServerEvent,
 };
@@ -50,7 +51,8 @@ impl Username {
 }
 
 fn main() {
-    env_logger::init();
+    // env_logger::init();
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
     println!("Usage: server [SERVER_PORT] or client [SERVER_PORT] [USER_NAME]");
     let args: Vec<String> = std::env::args().collect();
 
@@ -159,7 +161,7 @@ fn server(public_addr: SocketAddr) {
     }
 }
 
-fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Response {
+fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<(u64, Rtc)>) -> Response {
     println!("Got web_request");
 
     if request.method() == "GET" {
@@ -174,9 +176,14 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Resp
         panic!("error parsing HTTP request {}", e);
     }
 
-    println!("offer sdp {}", req_data);
+    // println!("offer sdp {}", req_data);
 
-    let offer = match SdpOffer::from_sdp_string(&req_data) {
+    let ice_req = match serde_json::from_str::<ICERequest>(&req_data) {
+        Ok(r) => r,
+        Err(e) => panic!("failed to deserialize ICE request: {}", e),
+    };
+
+    let offer = match SdpOffer::from_sdp_string(&ice_req.sdp) {
         Ok(o) => o,
         Err(e) => {
             panic!("error parsing sdp offer {}", e)
@@ -197,8 +204,11 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Resp
     // Create an SDP Answer.
     let answer = rtc.sdp_api().accept_offer(offer).expect("offer to be accepted");
 
+    println!("showing the source in the first place...");
+    rtc.show_send_addr();
+
     // The Rtc instance is shipped off to the main run loop.
-    tx.send(rtc).expect("to send Rtc instance");
+    tx.send((ice_req.client_id, rtc)).expect("to send Rtc instance");
 
     // let body = serde_json::to_vec(&answer).expect("answer to serialize");
     let body = answer.to_sdp_string();

@@ -26,6 +26,8 @@ use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
 use str0m::Event;
 use str0m::{net::Receive, Candidate, IceConnectionState, Input, Output, Rtc, RtcError};
 
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+
 #[derive(Debug)]
 #[cfg_attr(feature = "bevy", derive(bevy_ecs::prelude::Event))]
 pub enum NetcodeTransportError {
@@ -90,7 +92,7 @@ pub struct Str0mClient {
     chosen_rid: Option<Rid>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Str0mClientId(u64);
 
 impl Deref for Str0mClientId {
@@ -131,11 +133,12 @@ impl TrackOut {
 }
 
 impl Str0mClient {
-    fn new(rtc: Rtc) -> Str0mClient {
-        static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
-        let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    fn new(client_id: u64, rtc: Rtc) -> Str0mClient {
+        // static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+        // let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
         Str0mClient {
-            id: Str0mClientId(next_id),
+            // id: Str0mClientId(next_id),
+            id: Str0mClientId(client_id),
             rtc,
             pending: None,
             cid: None,
@@ -347,7 +350,7 @@ impl Str0mClient {
         // String::from_utf8(d.data.clone()).unwrap_or(String::new()).split();
 
         // let json = serde_json::to_string(&answer).unwrap();
-        // channel.write(false, &d.data).expect("to write answer");
+        channel.write(false, &d.data).expect("to write answer");
 
         Propagated::Noop
     }
@@ -448,6 +451,10 @@ impl Str0mClient {
     pub fn show_send_addr(&self) {
         self.rtc.show_send_addr();
     }
+
+    pub fn get_send_addr(&self) -> Option<(SocketAddr, SocketAddr)> {
+        self.rtc.get_send_addr()
+    }
 }
 
 /// Events propagated between client.
@@ -486,5 +493,17 @@ impl Propagated {
         } else {
             None
         }
+    }
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ICERequest {
+    pub sdp: String,
+    pub client_id: u64,
+}
+
+impl ICERequest {
+    pub fn new(sdp: String, client_id: u64) -> ICERequest {
+        ICERequest { sdp, client_id }
     }
 }

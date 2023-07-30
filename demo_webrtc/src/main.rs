@@ -3,17 +3,18 @@ use clap::{Arg, Command};
 use bytes::Bytes;
 use log::warn;
 use renet::{
-    transport::{ClientAuthentication, NetcodeClientTransport},
+    transport::{ClientAuthentication, ICERequest, NetcodeClientTransport},
     ConnectionConfig, DefaultChannel, RenetClient,
 };
 use reqwest::{Client as HttpClient, Response as HttpResponse};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     sync::Arc,
     thread,
     time::{Duration, SystemTime},
 };
-use tokio::{sync::mpsc, time::sleep};
+use tokio::time::sleep;
 use webrtc::{
     api::{setting_engine::SettingEngine, APIBuilder},
     data::data_channel::DataChannel,
@@ -61,7 +62,8 @@ async fn main() -> Result<(), RTCError> {
     const SERVER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1111);
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-    let client_id: u64 = 0;
+    // let client_id: u64 = 0;
+    let client_id = current_time.as_millis() as u64;
     let username = Username("Nick".to_string());
     let authentication = ClientAuthentication::Unsecure {
         server_addr: SERVER_ADDR,
@@ -70,17 +72,27 @@ async fn main() -> Result<(), RTCError> {
         protocol_id: PROTOCOL_ID,
     };
 
-    let mut transport = NetcodeClientTransport::new(current_time, authentication, socket).await.unwrap();
+    log::info!("creating renet transport client using id {}", client_id);
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    let mut transport = NetcodeClientTransport::new(current_time, authentication, socket, tx.clone())
+        .await
+        .unwrap();
     let offer = transport.create_offer().await.expect("offer creation failed");
 
     let http_client = HttpClient::new();
+    let payload = match serde_json::to_string(&ICERequest::new(offer.sdp.clone(), client_id)) {
+        Ok(payload) => payload,
+        Err(e) => panic!("failed to serialize ICE request: {}", e),
+    };
+
     let response: HttpResponse = loop {
         let request = http_client
             .post(server_url.clone())
-            // .header("content-type", "application/json; charset=utf-8")
-            // .body(payload.clone());
-            .header("Content-Length", offer.sdp.len())
-            .body(offer.sdp.clone());
+            .header("content-type", "application/json; charset=utf-8")
+            .body(payload.clone());
+        // .header("Content-Length", offer.sdp.len())
+        // .body(offer.sdp.clone());
 
         match request.send().await {
             Ok(resp) => {
@@ -101,6 +113,7 @@ async fn main() -> Result<(), RTCError> {
     // loop {}
 
     let mut packet_seq = 0;
+
     loop {
         // log::debug!("transport.is_connected {}", transport.is_connected());
         // log::debug!("transport.is_connecting {}", transport.is_connecting());
@@ -110,7 +123,7 @@ async fn main() -> Result<(), RTCError> {
         // Receive new messages and update client
         client.update(delta_time);
         transport
-            .update(delta_time, &mut client)
+            .update(delta_time, &mut client, &rx)
             .await
             .map_err(|e| log::error!("transport update error {e}"))
             .unwrap();

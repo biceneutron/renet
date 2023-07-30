@@ -1,6 +1,7 @@
 use std::{
     io,
     net::{SocketAddr, UdpSocket},
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     time::Duration,
 };
 
@@ -35,7 +36,7 @@ use webrtc::{
 // for develop
 use bytes::Bytes;
 use std::fmt;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::time::sleep;
 
 /// Configuration to establish an secure ou unsecure connection with the server.
 #[derive(Debug)]
@@ -69,7 +70,12 @@ pub struct NetcodeClientTransport {
 }
 
 impl NetcodeClientTransport {
-    pub async fn new(current_time: Duration, authentication: ClientAuthentication, socket: UdpSocket) -> Result<Self, NetcodeError> {
+    pub async fn new(
+        current_time: Duration,
+        authentication: ClientAuthentication,
+        socket: UdpSocket,
+        tx: SyncSender<Vec<u8>>,
+    ) -> Result<Self, NetcodeError> {
         socket.set_nonblocking(true)?;
         let connect_token: ConnectToken = match authentication {
             ClientAuthentication::Unsecure {
@@ -171,10 +177,11 @@ impl NetcodeClientTransport {
         //     })
         // }));
 
-        let d_label = data_channel.label().to_owned();
+        // let d_label = data_channel.label().to_owned();
         data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
-            let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-            println!("Received from server, '{d_label}': {msg_str}");
+            let msg_str = String::from_utf8(msg.data.to_vec()).unwrap_or("cannot be parsed".to_string());
+            println!("Received from server, length: {}, data: {}", msg.data.len(), msg_str);
+            tx.send(msg.data.to_vec()).expect("to send Rtc instance");
             Box::pin(async {})
         }));
 
@@ -339,7 +346,12 @@ impl NetcodeClientTransport {
     }
 
     /// Advances the transport by the duration, and receive packets from the network.
-    pub async fn update(&mut self, duration: Duration, client: &mut RenetClient) -> Result<(), NetcodeTransportError> {
+    pub async fn update(
+        &mut self,
+        duration: Duration,
+        client: &mut RenetClient,
+        rx: &Receiver<Vec<u8>>,
+    ) -> Result<(), NetcodeTransportError> {
         if let Some(reason) = self.netcode_client.disconnect_reason() {
             // Mark the client as disconnected if an error occured in the transport layer
             if !client.is_disconnected() {
@@ -359,34 +371,42 @@ impl NetcodeClientTransport {
         loop {
             // #TODO instead of `self.socket.recv_from`, read from mpsc channel. The `on_message` callback of the
             // data channel receives WebRTC messages and writes the messages into the mpsc channel.
-            let packet = match self.socket.recv_from(&mut self.buffer) {
-                Ok((len, addr)) => {
-                    println!("##### received a packet!!!!!");
-
-                    if addr != self.netcode_client.server_addr() {
-                        log::debug!("Discarded packet from unknown server {:?}", addr);
-                        continue;
-                    }
-
-                    &mut self.buffer[..len]
+            // try_recv here won't lock up the thread.
+            let mut packet = match rx.try_recv() {
+                Ok(data) => {
+                    println!("##### received packet from mpsc channel");
+                    data
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => break,
-                Err(e) => return Err(NetcodeTransportError::IO(e)),
+                Err(TryRecvError::Empty) => break,
+                _ => panic!("Receiver<Rtc> disconnected"),
             };
+            // let packet = match self.socket.recv_from(&mut self.buffer) {
+            //     Ok((len, addr)) => {
 
-            if let Some(payload) = self.netcode_client.process_packet(packet) {
+            //         if addr != self.netcode_client.server_addr() {
+            //             log::debug!("Discarded packet from unknown server {:?}", addr);
+            //             continue;
+            //         }
+
+            //         &mut self.buffer[..len]
+            //     }
+            //     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            //     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => break,
+            //     Err(e) => return Err(NetcodeTransportError::IO(e)),
+            // };
+
+            if let Some(payload) = self.netcode_client.process_packet(&mut packet) {
                 client.process_packet(payload);
             }
         }
 
-        // if self.is_data_channel_open() {
-        if let Some((packet, addr)) = self.netcode_client.update(duration) {
-            // println!("update: data channel sending {} bytes, to {:?}", packet.len(), addr);
-            self.socket.send_to(packet, addr)?;
-            // self.data_channel.send(&Bytes::copy_from_slice(packet)).await?;
+        if self.is_data_channel_open() {
+            if let Some((packet, addr)) = self.netcode_client.update(duration) {
+                println!("update: data channel sending {} bytes, to {:?}", packet.len(), addr);
+                // self.socket.send_to(packet, addr)?;
+                self.data_channel.send(&Bytes::copy_from_slice(packet)).await?;
+            }
         }
-        // }
 
         Ok(())
     }

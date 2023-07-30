@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io,
     net::{SocketAddr, UdpSocket},
     time::Duration,
@@ -8,7 +9,7 @@ use renetcode::{NetcodeServer, ServerResult, NETCODE_KEY_BYTES, NETCODE_MAX_PACK
 
 use crate::server::RenetServer;
 
-use super::{NetcodeTransportError, Propagated, Str0mClient};
+use super::{NetcodeTransportError, Propagated, Str0mClient, Str0mClientId};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::time::Instant;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
@@ -56,6 +57,7 @@ pub struct NetcodeServerTransport {
     buffer: [u8; NETCODE_MAX_PACKET_BYTES],
 
     str0m_clients: Vec<Str0mClient>,
+    datachannel_mapping: HashMap<Str0mClientId, SocketAddr>,
 }
 
 impl NetcodeServerTransport {
@@ -81,6 +83,7 @@ impl NetcodeServerTransport {
             netcode_server,
             buffer: [0; NETCODE_MAX_PACKET_BYTES],
             str0m_clients: vec![],
+            datachannel_mapping: HashMap::new(),
         })
     }
 
@@ -115,7 +118,12 @@ impl NetcodeServerTransport {
     pub fn disconnect_all(&mut self, server: &mut RenetServer) {
         for client_id in self.netcode_server.clients_id() {
             let server_result = self.netcode_server.disconnect(client_id);
-            handle_server_result(server_result, &self.socket, server);
+
+            if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, client_id) {
+                handle_server_result(server_result, str0m_client, server);
+            } else {
+                panic!("No corresponding str0m client");
+            }
         }
     }
 
@@ -134,18 +142,40 @@ impl NetcodeServerTransport {
         loop {
             // str0m handing output events
             // Poll all clients, and get propagated events as a result.
-            let mut channel_data = vec![];
+            // let mut channel_data = vec![];
             let to_propagate: Vec<_> = self
                 .str0m_clients
                 .iter_mut()
                 .map(|c| {
-                    c.show_send_addr();
+                    // println!("showing the source...");
+                    // c.show_send_addr();
+
+                    if let Some((_, destination)) = c.get_send_addr() {
+                        self.datachannel_mapping.entry(c.id).or_insert_with(|| destination);
+                        // self.datachannel_mapping.
+                    }
 
                     let (propagated, maybe_data) = c.poll_output(&self.socket);
-                    if let Some(data) = maybe_data {
-                        channel_data.push(data);
+                    if maybe_data.is_some() && self.datachannel_mapping.contains_key(&c.id) {
+                        let source = self.datachannel_mapping.get(&c.id).unwrap();
+                        let data = maybe_data.unwrap();
+                        // channel_data.push((addr.clone(), data.clone()));
+
+                        // renet
+                        println!(
+                            "after being processed by str0m, {} bytes go in to renet, from {:?}",
+                            data.len(),
+                            source
+                        );
+                        let buf = &mut data.to_vec();
+                        let server_result = self.netcode_server.process_packet(*source, buf);
+                        handle_server_result(server_result, c, server);
                     }
-                    propagated
+                    // if let Some(data) = maybe_data {
+                    //     // channel_data.push((addr.clone(), data.clone()));
+                    //     channel_data.push(data);
+                    // }
+                    return propagated;
                 })
                 .collect();
             let timeouts: Vec<_> = to_propagate.iter().filter_map(|p| p.as_timeout()).collect();
@@ -154,19 +184,9 @@ impl NetcodeServerTransport {
             if to_propagate.len() > timeouts.len() {
                 propagate(&mut self.str0m_clients, to_propagate);
                 // Start over to propagate more client data until all are timeouts.
+                println!("continued");
                 continue;
             }
-
-            // str0m reads from socket
-            // if let Some(input) = read_socket_input(&self.socket, &mut self.buffer) {
-            //     if let Some(client) = self.str0m_clients.iter_mut().find(|c| c.accepts(&input)) {
-            //         client.handle_input(input);
-            //     } else {
-            //         // This is quite common because we don't get the Rtc instance via the mpsc channel
-            //         // quickly enough before the browser send the first STUN.
-            //         log::debug!("No client accepts UDP input: {:?}", input);
-            //     }
-            // }
 
             match self.socket.recv_from(&mut self.buffer) {
                 Ok((len, source)) => {
@@ -190,10 +210,10 @@ impl NetcodeServerTransport {
                         }
                     }
 
-                    // renet
-                    println!("udp socket received {} bytes, from {:?}, handled by renet", len, source);
-                    let server_result = self.netcode_server.process_packet(source, &mut self.buffer[..len]);
-                    handle_server_result(server_result, &self.socket, server);
+                    // // renet
+                    // println!("udp socket received {} bytes, from {:?}, handled by renet", len, source);
+                    // let server_result = self.netcode_server.process_packet(source, &mut self.buffer[..len]);
+                    // handle_server_result(server_result, &self.socket, server);
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => break,
@@ -202,14 +222,26 @@ impl NetcodeServerTransport {
             };
         }
 
+        // #TODO maybe need a new mapping for necode_server connection id to str0m client id
         for client_id in self.netcode_server.clients_id() {
             let server_result = self.netcode_server.update_client(client_id);
-            handle_server_result(server_result, &self.socket, server);
+
+            // #TODO get the str0m client of this client
+            if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, client_id) {
+                handle_server_result(server_result, str0m_client, server);
+            } else {
+                panic!("No corresponding str0m client");
+            }
         }
 
         for disconnection_id in server.disconnections_id() {
             let server_result = self.netcode_server.disconnect(disconnection_id);
-            handle_server_result(server_result, &self.socket, server);
+
+            if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, disconnection_id) {
+                handle_server_result(server_result, str0m_client, server);
+            } else {
+                panic!("No corresponding str0m client");
+            }
         }
 
         // str0m
@@ -243,11 +275,11 @@ impl NetcodeServerTransport {
         }
     }
 
-    pub fn spawn_new_client(&mut self, rx: &Receiver<Rtc>) {
+    pub fn spawn_new_client(&mut self, rx: &Receiver<(u64, Rtc)>) {
         // try_recv here won't lock up the thread.
         match rx.try_recv() {
-            Ok(rtc) => {
-                let new_client = Str0mClient::new(rtc);
+            Ok((client_id, rtc)) => {
+                let new_client = Str0mClient::new(client_id, rtc);
                 self.str0m_clients.push(new_client);
             }
             Err(TryRecvError::Empty) => {}
@@ -260,10 +292,16 @@ impl NetcodeServerTransport {
     }
 }
 
-fn handle_server_result(server_result: ServerResult, socket: &UdpSocket, reliable_server: &mut RenetServer) {
-    let send_packet = |packet: &[u8], addr: SocketAddr| {
-        println!("udp socket sending {} bytes, to {:?}", packet.len(), addr);
-        if let Err(err) = socket.send_to(packet, addr) {
+fn find_str0m_client_by_id(clients: &mut Vec<Str0mClient>, client_id: u64) -> Option<&mut Str0mClient> {
+    clients.iter_mut().find(|c| c.id.0 == client_id)
+}
+
+fn handle_server_result(server_result: ServerResult, client: &mut Str0mClient, reliable_server: &mut RenetServer) {
+    // channel.write(false, &d.data).expect("to write answer");
+    let mut channel = client.cid.and_then(|id| client.rtc.channel(id)).expect("channel to be open");
+    let mut send_packet = |packet: &[u8], addr: SocketAddr| {
+        println!("str0m channel sending {} bytes, to {:?}", packet.len(), addr);
+        if let Err(err) = channel.write(true, packet) {
             log::error!("Failed to send packet to {addr}: {err}");
         }
     };

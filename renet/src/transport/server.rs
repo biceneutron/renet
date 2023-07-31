@@ -10,14 +10,9 @@ use renetcode::{NetcodeServer, ServerResult, NETCODE_KEY_BYTES, NETCODE_MAX_PACK
 use crate::server::RenetServer;
 
 use super::{NetcodeTransportError, Propagated, Str0mClient, Str0mClientId};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Instant;
-use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::channel::{ChannelData, ChannelId};
-use str0m::media::MediaKind;
-use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
-use str0m::Event;
-use str0m::{net::Receive, Candidate, IceConnectionState, Input, Output, Rtc, RtcError};
+use str0m::{net::Receive, Input, Rtc};
 
 /// Configuration to establish a secure or unsecure connection with the server.
 #[derive(Debug)]
@@ -202,11 +197,6 @@ impl NetcodeServerTransport {
                             log::debug!("No client accepts UDP input: {:?}", input);
                         }
                     }
-
-                    // // renet
-                    // println!("udp socket received {} bytes, from {:?}, handled by renet", len, source);
-                    // let server_result = self.netcode_server.process_packet(source, &mut self.buffer[..len]);
-                    // handle_server_result(server_result, &self.socket, server);
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => break,
@@ -215,11 +205,9 @@ impl NetcodeServerTransport {
             };
         }
 
-        // #TODO maybe need a new mapping for necode_server connection id to str0m client id
         for client_id in self.netcode_server.clients_id() {
             let server_result = self.netcode_server.update_client(client_id);
 
-            // #TODO get the str0m client of this client
             if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, client_id) {
                 handle_server_result(server_result, str0m_client, server);
             } else {
@@ -366,41 +354,5 @@ fn propagate(clients: &mut [Str0mClient], to_propagate: Vec<Propagated>) {
                 Propagated::Noop | Propagated::Timeout(_) => {}
             }
         }
-    }
-}
-
-fn read_socket_input<'a>(socket: &UdpSocket, buf: &'a mut [u8]) -> Option<Input<'a>> {
-    // buf.resize(2000, 0);
-
-    match socket.recv_from(buf) {
-        Ok((n, source)) => {
-            // buf.truncate(n);
-
-            // println!(
-            //     "received {}",
-            //     String::from_utf8(buf.clone()).unwrap_or("".to_string())
-            // );
-
-            // Parse data to a DatagramRecv, which help preparse network data to
-            // figure out the multiplexing of all protocols on one UDP port.
-            let Ok(contents) = buf[..n].try_into() else {
-                return None;
-            };
-
-            return Some(Input::Receive(
-                Instant::now(),
-                Receive {
-                    source,
-                    destination: socket.local_addr().unwrap(),
-                    contents,
-                },
-            ));
-        }
-
-        Err(e) => match e.kind() {
-            // Expected error for set_read_timeout(). One for windows, one for the rest.
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => None,
-            _ => panic!("UdpSocket read failed: {e:?}"),
-        },
     }
 }

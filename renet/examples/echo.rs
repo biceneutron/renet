@@ -1,28 +1,23 @@
+use renet::{
+    transport::{ICEResponse, NetcodeServerTransport, ServerAuthentication, ServerConfig, NETCODE_USER_DATA_BYTES},
+    ConnectionConfig, DefaultChannel, RenetServer, ServerEvent,
+};
 use std::{
     collections::HashMap,
     net::{SocketAddr, UdpSocket},
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, SyncSender},
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
 
-use renet::{
-    transport::{
-        ClientAuthentication, ICERequest, NetcodeClientTransport, NetcodeServerTransport, ServerAuthentication, ServerConfig,
-        NETCODE_USER_DATA_BYTES,
-    },
-    ConnectionConfig, DefaultChannel, RenetClient, RenetServer, ServerEvent,
-};
-
 use rouille::Server;
 use rouille::{Request, Response};
-use std::io::{ErrorKind, Read};
-use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::channel::{ChannelData, ChannelId};
-use str0m::media::MediaKind;
-use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
-use str0m::Event;
-use str0m::{net::Receive, Candidate, IceConnectionState, Input, Output, Rtc, RtcError};
+use std::io::Read;
+use str0m::change::SdpOffer;
+use str0m::{Candidate, Rtc};
 
 // Helper struct to pass an username in the user data
 struct Username(String);
@@ -113,7 +108,7 @@ fn server(public_addr: SocketAddr) {
     });
 
     loop {
-        println!("#### num of str0m clients: {}", transport.get_num_str0mclients());
+        // println!("#### num of str0m clients: {}", transport.get_num_str0mclients());
 
         let now = Instant::now();
         let duration = now - last_updated;
@@ -167,6 +162,10 @@ fn server(public_addr: SocketAddr) {
 fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<(u64, Rtc)>) -> Response {
     println!("Got web_request");
 
+    static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let client_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    println!("using client id {}", client_id);
+
     if request.method() == "GET" {
         return Response::empty_204();
     }
@@ -181,16 +180,9 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<(u64, Rtc)>) 
 
     // println!("offer sdp {}", req_data);
 
-    let ice_req = match serde_json::from_str::<ICERequest>(&req_data) {
-        Ok(r) => r,
-        Err(e) => panic!("failed to deserialize ICE request: {}", e),
-    };
-
-    let offer = match SdpOffer::from_sdp_string(&ice_req.sdp) {
-        Ok(o) => o,
-        Err(e) => {
-            panic!("error parsing sdp offer {}", e)
-        }
+    let offer = match SdpOffer::from_sdp_string(&req_data) {
+        Ok(sdp) => sdp,
+        Err(e) => return Response::empty_400(),
     };
 
     // let offer: SdpOffer = serde_json::from_reader(&mut data).expect("serialized offer");
@@ -211,21 +203,13 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<(u64, Rtc)>) 
     rtc.show_send_addr();
 
     // The Rtc instance is shipped off to the main run loop.
-    tx.send((ice_req.client_id, rtc)).expect("to send Rtc instance");
+    tx.send((client_id, rtc)).expect("to send Rtc instance");
 
     // let body = serde_json::to_vec(&answer).expect("answer to serialize");
-    let body = answer.to_sdp_string();
+    let response = match serde_json::to_string(&ICEResponse::new(answer.to_sdp_string(), client_id)) {
+        Ok(res) => res,
+        Err(e) => return Response::text(format!("Server failed creating answer SDP: {}", e)).with_status_code(500),
+    };
 
-    // Response::from_data("application/json", body)
-    Response::text(body)
-}
-
-fn spawn_stdin_channel() -> Receiver<String> {
-    let (tx, rx) = mpsc::channel::<String>();
-    thread::spawn(move || loop {
-        let mut buffer = String::new();
-        std::io::stdin().read_line(&mut buffer).unwrap();
-        tx.send(buffer.trim_end().to_string()).unwrap();
-    });
-    rx
+    Response::text(response)
 }

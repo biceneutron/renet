@@ -11,11 +11,10 @@ pub use renetcode::{
     NETCODE_KEY_BYTES, NETCODE_USER_DATA_BYTES,
 };
 
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{SocketAddr, UdpSocket};
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 pub use webrtc::Error as WebRTCError;
 
 // str0m
@@ -24,9 +23,9 @@ use str0m::channel::{ChannelData, ChannelId};
 use str0m::media::MediaKind;
 use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
 use str0m::Event;
-use str0m::{net::Receive, Candidate, IceConnectionState, Input, Output, Rtc, RtcError};
+use str0m::{IceConnectionState, Input, Output, Rtc};
 
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 #[cfg_attr(feature = "bevy", derive(bevy_ecs::prelude::Event))]
@@ -497,13 +496,13 @@ impl Propagated {
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct ICERequest {
+pub struct ICEResponse {
     pub sdp: String,
     pub client_id: u64,
 }
 
-impl ICERequest {
-    pub fn new(sdp: String, client_id: u64) -> ICERequest {
-        ICERequest { sdp, client_id }
+impl ICEResponse {
+    pub fn new(sdp: String, client_id: u64) -> ICEResponse {
+        ICEResponse { sdp, client_id }
     }
 }

@@ -3,7 +3,7 @@ use clap::{Arg, Command};
 use bytes::Bytes;
 use log::warn;
 use renet::{
-    transport::{ClientAuthentication, ICERequest, NetcodeClientTransport},
+    transport::{ClientAuthentication, ICERequest, NetcodeClientTransport, NetcodeTransportError},
     ConnectionConfig, DefaultChannel, RenetClient,
 };
 use reqwest::{Client as HttpClient, Response as HttpResponse};
@@ -37,7 +37,7 @@ const SLICE_MESSAGE: &str =
     "CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET";
 
 #[tokio::main]
-async fn main() -> Result<(), RTCError> {
+async fn main() -> Result<(), NetcodeTransportError> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
     let args: Vec<String> = std::env::args().collect();
@@ -128,7 +128,7 @@ async fn main() -> Result<(), RTCError> {
         client.update(delta_time);
         if let Err(e) = transport.update(delta_time, &mut client, &rx).await {
             log::error!("transport update error {e}");
-            // break;
+            break;
         };
 
         if transport.is_connected() {
@@ -145,10 +145,10 @@ async fn main() -> Result<(), RTCError> {
                 println!("Sending '{message}'");
                 client.send_message(DefaultChannel::ReliableOrdered, message.as_bytes().to_vec());
             }
-            // if packet_seq == 30 {
-            //     transport.disconnect().await;
-            //     // break
-            // }
+            if packet_seq == 30 {
+                transport.disconnect().await;
+                // break
+            }
             packet_seq += 1;
         }
 
@@ -164,6 +164,9 @@ async fn main() -> Result<(), RTCError> {
 
         thread::sleep(Duration::from_millis(50));
     }
+
+    log::info!("Closing data channel");
+    transport.close_rtc().await?;
 
     log::info!("Disconnected, program terminated");
     Ok(())

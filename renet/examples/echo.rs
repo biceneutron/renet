@@ -113,7 +113,7 @@ fn server(public_addr: SocketAddr) {
     });
 
     loop {
-        // println!("#### num of str0m clients: {}", transport.get_num_str0mclients());
+        println!("#### num of str0m clients: {}", transport.get_num_str0mclients());
 
         let now = Instant::now();
         let duration = now - last_updated;

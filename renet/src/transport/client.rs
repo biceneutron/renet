@@ -423,4 +423,11 @@ impl NetcodeClientTransport {
     pub fn is_data_channel_open(&self) -> bool {
         self.data_channel.ready_state() == RTCDataChannelState::Open
     }
+
+    pub async fn close_rtc(&self) -> Result<(), NetcodeTransportError> {
+        self.data_channel.close().await?;
+        self.peer_connection.close().await?;
+
+        Ok(())
+    }
 }

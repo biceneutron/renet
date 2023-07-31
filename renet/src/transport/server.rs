@@ -146,6 +146,10 @@ impl NetcodeServerTransport {
                 .str0m_clients
                 .iter_mut()
                 .map(|c| {
+                    if !c.rtc.is_alive() {
+                        return Propagated::Timeout(Instant::now());
+                    }
+
                     if let Some((_, destination)) = c.get_send_addr() {
                         self.datachannel_mapping.entry(c.id).or_insert_with(|| destination);
                     }

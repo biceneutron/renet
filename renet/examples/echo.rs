@@ -149,6 +149,9 @@ fn server(public_addr: SocketAddr) {
                 println!("Client {} ({}) sent text: {}", username, client_id, text);
                 // let text = format!("{}: {}", username, text);
                 // received_messages.push(text);
+
+                println!("Echoing back {}", text);
+                server.send_message(client_id, DefaultChannel::ReliableOrdered, text.as_bytes().to_vec());
             }
         }
 
@@ -156,7 +159,7 @@ fn server(public_addr: SocketAddr) {
         //     server.broadcast_message(DefaultChannel::ReliableOrdered, text.as_bytes().to_vec());
         // }
 
-        // transport.send_packets(&mut server);
+        transport.send_packets(&mut server);
         thread::sleep(Duration::from_millis(50));
     }
 }

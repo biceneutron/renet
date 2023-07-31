@@ -142,24 +142,18 @@ impl NetcodeServerTransport {
         loop {
             // str0m handing output events
             // Poll all clients, and get propagated events as a result.
-            // let mut channel_data = vec![];
             let to_propagate: Vec<_> = self
                 .str0m_clients
                 .iter_mut()
                 .map(|c| {
-                    // println!("showing the source...");
-                    // c.show_send_addr();
-
                     if let Some((_, destination)) = c.get_send_addr() {
                         self.datachannel_mapping.entry(c.id).or_insert_with(|| destination);
-                        // self.datachannel_mapping.
                     }
 
                     let (propagated, maybe_data) = c.poll_output(&self.socket);
                     if maybe_data.is_some() && self.datachannel_mapping.contains_key(&c.id) {
                         let source = self.datachannel_mapping.get(&c.id).unwrap();
                         let data = maybe_data.unwrap();
-                        // channel_data.push((addr.clone(), data.clone()));
 
                         // renet
                         println!(
@@ -171,10 +165,6 @@ impl NetcodeServerTransport {
                         let server_result = self.netcode_server.process_packet(*source, buf);
                         handle_server_result(server_result, c, server);
                     }
-                    // if let Some(data) = maybe_data {
-                    //     // channel_data.push((addr.clone(), data.clone()));
-                    //     channel_data.push(data);
-                    // }
                     return propagated;
                 })
                 .collect();
@@ -184,7 +174,6 @@ impl NetcodeServerTransport {
             if to_propagate.len() > timeouts.len() {
                 propagate(&mut self.str0m_clients, to_propagate);
                 // Start over to propagate more client data until all are timeouts.
-                println!("continued");
                 continue;
             }
 
@@ -261,10 +250,19 @@ impl NetcodeServerTransport {
             for packet in packets {
                 match self.netcode_server.generate_payload_packet(client_id, &packet) {
                     Ok((addr, payload)) => {
-                        if let Err(e) = self.socket.send_to(payload, addr) {
-                            log::error!("Failed to send packet to client {client_id} ({addr}): {e}");
+                        if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, client_id) {
+                            let mut channel = str0m_client
+                                .cid
+                                .and_then(|id| str0m_client.rtc.channel(id))
+                                .expect("channel to be open");
+                            println!("str0m channel sending {} bytes, to {:?}", payload.len(), addr);
+                            if let Err(err) = channel.write(true, payload) {
+                                log::error!("Failed to send packet to {addr}: {err}");
+                            }
+                        } else {
+                            log::error!("Failed to send packet to client {client_id} ({addr}): cannot find str0m client");
                             continue 'clients;
-                        }
+                        };
                     }
                     Err(e) => {
                         log::error!("Failed to encrypt payload packet for client {client_id}: {e}");

@@ -32,6 +32,10 @@ use webrtc::{
 const PROTOCOL_ID: u64 = 7;
 const NETCODE_USER_DATA_BYTES: usize = 256;
 
+const SMALL_MESSAGE: &str = "CLIENT_PACKET";
+const SLICE_MESSAGE: &str =
+    "CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET";
+
 #[tokio::main]
 async fn main() -> Result<(), RTCError> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
@@ -122,11 +126,10 @@ async fn main() -> Result<(), RTCError> {
         let delta_time = Duration::from_millis(16);
         // Receive new messages and update client
         client.update(delta_time);
-        transport
-            .update(delta_time, &mut client, &rx)
-            .await
-            .map_err(|e| log::error!("transport update error {e}"))
-            .unwrap();
+        if let Err(e) = transport.update(delta_time, &mut client, &rx).await {
+            log::error!("transport update error {e}");
+            // break;
+        };
 
         if transport.is_connected() {
             // Receive message from server
@@ -137,11 +140,15 @@ async fn main() -> Result<(), RTCError> {
             }
 
             // Send message
-            if packet_seq == 0 {
-                let message = format!("CLIENT_PACKET_{}", packet_seq);
+            if packet_seq % 50 == 0 {
+                let message = format!("{}_{}", SLICE_MESSAGE, packet_seq);
                 println!("Sending '{message}'");
                 client.send_message(DefaultChannel::ReliableOrdered, message.as_bytes().to_vec());
             }
+            // if packet_seq == 30 {
+            //     transport.disconnect().await;
+            //     // break
+            // }
             packet_seq += 1;
         }
 
@@ -157,6 +164,9 @@ async fn main() -> Result<(), RTCError> {
 
         thread::sleep(Duration::from_millis(50));
     }
+
+    log::info!("Disconnected, program terminated");
+    Ok(())
 }
 
 struct Username(String);

@@ -296,15 +296,19 @@ impl NetcodeClientTransport {
     /// Disconnect the client from the transport layer.
     /// This sends the disconnect packet instantly, use this when closing/exiting games,
     /// should use [RenetClient::disconnect][crate::RenetClient::disconnect] otherwise.
-    pub fn disconnect(&mut self) {
+    pub async fn disconnect(&mut self) {
         if self.netcode_client.is_disconnected() {
             return;
         }
 
         match self.netcode_client.disconnect() {
             Ok((addr, packet)) => {
-                println!("udp socket sending disconnect 2 {} bytes, to {:?}", packet.len(), addr);
-                if let Err(e) = self.socket.send_to(packet, addr) {
+                println!(
+                    "data channel actively sending disconnect packet {} bytes, to {:?}",
+                    packet.len(),
+                    addr
+                );
+                if let Err(e) = self.data_channel.send(&Bytes::copy_from_slice(packet)).await {
                     log::error!("Failed to send disconnect packet: {e}");
                 }
             }
@@ -363,8 +367,13 @@ impl NetcodeClientTransport {
 
         if let Some(error) = client.disconnect_reason() {
             let (addr, disconnect_packet) = self.netcode_client.disconnect()?;
-            println!("udp socket sending disconnect 1 {} bytes, to {:?}", disconnect_packet.len(), addr);
-            self.socket.send_to(disconnect_packet, addr)?;
+            println!(
+                "data channel sending disconnect packet {} bytes, to {:?}",
+                disconnect_packet.len(),
+                addr
+            );
+            // self.socket.send_to(disconnect_packet, addr)?;
+            self.data_channel.send(&Bytes::copy_from_slice(disconnect_packet)).await?;
             return Err(error.into());
         }
 

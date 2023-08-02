@@ -226,17 +226,24 @@ impl SendChannelReliable {
     }
 
     pub fn process_slice_message_ack(&mut self, message_id: u64, slice_index: usize) {
+        println!("process_slice_message_ack, self.unacked_messages: {}", self.unacked_messages.len());
         let Some(unacked_message) = self.unacked_messages.get_mut(&message_id) else {
             return;
         };
+
+        println!("process_slice_message_ack 1");
 
         let UnackedMessage::Sliced { message, num_slices, num_acked_slices, acked, .. } = unacked_message else {
             unreachable!("called ack on sliced message but found small");
         };
 
+        println!("process_slice_message_ack 2");
+
         if acked[slice_index] {
             return;
         }
+
+        println!("process_slice_message_ack 3");
 
         acked[slice_index] = true;
         *num_acked_slices += 1;
@@ -245,6 +252,8 @@ impl SendChannelReliable {
             self.memory_usage_bytes -= message.len();
             self.unacked_messages.remove(&message_id);
         }
+
+        println!("process_slice_message_ack 4");
     }
 }
 

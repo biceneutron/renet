@@ -359,6 +359,7 @@ impl RenetClient {
                 }
             }
             Packet::ReliableSlice { channel_id, slice, .. } => {
+                println!("Packet::ReliableSlice");
                 let Some(channel) = self.receive_reliable_channels.get_mut(&channel_id) else {
                     self.disconnect_reason = Some(DisconnectReason::ReceivedInvalidChannelId(channel_id));
                     return;

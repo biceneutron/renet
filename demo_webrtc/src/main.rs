@@ -2,7 +2,7 @@ use clap::{Arg, Command};
 
 use log::warn;
 use renet::{
-    transport::{ClientAuthentication, ICEResponse, NetcodeClientTransport, NetcodeTransportError},
+    transport::{ClientAuthentication, ICEResponse, NetcodeClientTransport, NetcodeTransportError, Str0mClient},
     ConnectionConfig, DefaultChannel, RenetClient,
 };
 use reqwest::{Client as HttpClient, Response as HttpResponse};
@@ -25,6 +25,10 @@ use webrtc::{
     },
     sdp::description::session::ATTR_KEY_CANDIDATE,
 };
+
+use rand::Rng;
+use str0m::change::SdpAnswer;
+use str0m::{Candidate, Rtc};
 
 const PROTOCOL_ID: u64 = 7;
 const NETCODE_USER_DATA_BYTES: usize = 256;
@@ -61,96 +65,35 @@ async fn main() -> Result<(), NetcodeTransportError> {
     let mut client = RenetClient::new(ConnectionConfig::default());
 
     const SERVER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1111);
-    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let local_addr = Ipv4Addr::new(127, 0, 0, 1);
+    let udp_port = rand::thread_rng().gen_range(50000..=65535);
+    let udp_socket_addr = SocketAddr::from((local_addr.octets(), udp_port));
+    let socket = UdpSocket::bind(udp_socket_addr).unwrap();
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let username = Username("Nick".to_string());
     let (tx, rx) = mpsc::sync_channel(1);
 
     // webrtc
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_srtp_protection_profiles(vec![]);
-    // setting_engine.detach_data_channels();
-    setting_engine.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
-    setting_engine
-        .set_answering_dtls_role(DTLSRole::Client)
-        .expect("error in set_answering_dtls_role!");
-
-    // Create the API object with the MediaEngine
-    let api = APIBuilder::new().with_setting_engine(setting_engine).build();
-
-    // Prepare the configuration
-    let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            // urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
-        ..Default::default()
+    let mut rtc = Rtc::new();
+    let local_candidate = match Candidate::host(udp_socket_addr) {
+        Ok(c) => c,
+        Err(e) => panic!("Str0m cannot create local candidate: {}", e),
     };
-    let peer_connection = Arc::new(api.new_peer_connection(config).await?);
-    let data_channel = peer_connection
-        .create_data_channel(
-            "data",
-            Some(RTCDataChannelInit {
-                // ordered: Some(false),
-                // max_retransmits: Some(1),
-                // max_packet_life_time: Some(500),
-                ..Default::default()
-            }),
-        )
-        .await
-        .expect("cannot create data channel");
+    rtc.add_local_candidate(local_candidate);
 
-    peer_connection.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-        log::info!("Peer Connection State has changed: {s}");
-        if s == RTCPeerConnectionState::Failed {
-            log::debug!("Peer Connection has gone to failed exiting");
-            // let _ = done_tx.try_send(());
-        }
-
-        Box::pin(async {})
-    }));
-    data_channel.on_error(Box::new(move |error| {
-        log::error!("data channel error: {:?}", error);
-        Box::pin(async {})
-    }));
-
-    // let d_label = data_channel.label().to_owned();
-    data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
-        let msg_str = String::from_utf8(msg.data.to_vec()).unwrap_or("cannot be parsed".to_string());
-        println!("Received from server, length: {}, data: {}", msg.data.len(), msg_str);
-        tx.send(msg.data.to_vec()).expect("to send Rtc instance");
-        Box::pin(async {})
-    }));
-
-    peer_connection.on_ice_candidate(Box::new(move |candidate_opt| {
-        if let Some(candidate) = &candidate_opt {
-            log::debug!("received ice candidate from: {}", candidate.address);
-        } else {
-            log::debug!("all local candidates received");
-        }
-
-        Box::pin(async {})
-    }));
-    let offer = peer_connection.create_offer(None).await.expect("cannot create offer");
-    peer_connection
-        .set_local_description(offer.clone())
-        .await
-        .expect("cannot set local description");
+    let mut api = rtc.sdp_api();
+    let cid = api.add_channel("data".into());
+    let (offer, pending) = api.apply().unwrap();
+    let offer_string = offer.to_sdp_string();
 
     let http_client = HttpClient::new();
-    // let payload = match serde_json::to_string(&ICERequest::new(offer.sdp.clone(), client_id)) {
-    //     Ok(payload) => payload,
-    //     Err(e) => panic!("failed to serialize ICE request: {}", e),
-    // };
-    // let payload = peer_connection.local_description().await.unwrap().sdp;
-
     let response: HttpResponse = loop {
         let request = http_client
             .post(server_url.clone())
             // .header("content-type", "application/json; charset=utf-8")
             // .body(payload.clone());
-            .header("Content-Length", offer.sdp.len())
-            .body(offer.sdp.clone());
+            .header("Content-Length", offer_string.len())
+            .body(offer_string.clone());
 
         match request.send().await {
             Ok(resp) => {
@@ -170,46 +113,13 @@ async fn main() -> Result<(), NetcodeTransportError> {
         Err(e) => panic!("failed parsing ICE response: {}", e),
     };
 
-    let sdp = RTCSessionDescription::answer(ice_response.sdp).unwrap();
-
-    let parsed_sdp = match sdp.unmarshal() {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            panic!("error unmarshaling answer sdp {}", e);
-        }
+    let answer = match SdpAnswer::from_sdp_string(&ice_response.sdp) {
+        Ok(a) => a,
+        Err(e) => panic!("Str0m failed parsing answer SDP: {}", e),
     };
-
-    let mut candidate = Option::None;
-    if let Some(c) = parsed_sdp.attribute(ATTR_KEY_CANDIDATE) {
-        candidate = Some(c.to_owned());
-    } else {
-        for m_sdp in &parsed_sdp.media_descriptions {
-            if let Some(Some(c)) = m_sdp.attribute(ATTR_KEY_CANDIDATE) {
-                candidate = Some(c.to_owned());
-                break;
-            }
-        }
-        if candidate.is_none() {
-            panic!("error no candidate in answer sdp");
-        }
-    }
-
-    peer_connection
-        .set_remote_description(sdp)
-        .await
-        .expect("cannot set remote description");
-
-    // add ice candidate to connection
-    if let Err(error) = peer_connection
-        // .add_ice_candidate(session_response.candidate.candidate)
-        .add_ice_candidate(RTCIceCandidateInit {
-            candidate: candidate.unwrap(),
-            ..Default::default()
-        })
-        .await
-    {
-        panic!("Error during add_ice_candidate: {:?}", error);
-    }
+    if let Err(e) = rtc.sdp_api().accept_answer(pending, answer) {
+        panic!("Str0m failed accepting answer SDP: {}", e);
+    };
 
     // renet
     let authentication = ClientAuthentication::Unsecure {
@@ -219,11 +129,10 @@ async fn main() -> Result<(), NetcodeTransportError> {
         protocol_id: PROTOCOL_ID,
     };
 
+    let str0m_client = Str0mClient::new(ice_response.client_id, rtc);
     log::info!("creating renet transport client using id {}", ice_response.client_id);
 
-    let mut transport = NetcodeClientTransport::new(current_time, authentication, socket, peer_connection, data_channel)
-        .await
-        .unwrap();
+    let mut transport = NetcodeClientTransport::new(current_time, authentication, socket, str0m_client).unwrap();
 
     println!("#### Renet transport layer built");
 
@@ -235,13 +144,15 @@ async fn main() -> Result<(), NetcodeTransportError> {
         // log::debug!("transport.is_disconnected {}", transport.is_disconnected());
 
         let delta_time = Duration::from_millis(16);
+
         // Receive new messages and update client
         client.update(delta_time);
-        if let Err(e) = transport.update(delta_time, &mut client, &rx).await {
+        if let Err(e) = transport.update(delta_time, &mut client, &rx) {
             log::error!("transport update error {e}");
             break;
         };
 
+        // custom-logic
         if transport.is_connected() {
             // Receive message from server
             while let Some(message) = client.receive_message(DefaultChannel::ReliableOrdered) {
@@ -251,13 +162,13 @@ async fn main() -> Result<(), NetcodeTransportError> {
             }
 
             // Send message
-            if packet_seq % 50 == 0 {
-                let message = format!("{}_{}", SMALL_MESSAGE, packet_seq);
+            if packet_seq <= 100 && packet_seq % 10 == 0 {
+                let message = format!("{}_{}", SLICE_MESSAGE, packet_seq);
                 println!("Sending '{message}'");
                 client.send_message(DefaultChannel::ReliableOrdered, message.as_bytes().to_vec());
             }
             // if packet_seq == 30 {
-            //     transport.disconnect().await;
+            //     transport.disconnect();
             //     // break
             // }
             packet_seq += 1;
@@ -265,7 +176,7 @@ async fn main() -> Result<(), NetcodeTransportError> {
 
         // Send packets to server
         if transport.is_data_channel_open() {
-            match transport.send_packets(&mut client).await {
+            match transport.send_packets(&mut client) {
                 Ok(()) => {}
                 Err(e) => {
                     println!("sending error {e}")
@@ -276,8 +187,10 @@ async fn main() -> Result<(), NetcodeTransportError> {
         thread::sleep(Duration::from_millis(50));
     }
 
-    log::info!("Closing data channel");
-    transport.close_rtc().await?;
+    // #TODO handle str0m closing
+
+    log::info!("Closing str0m");
+    transport.close_rtc();
 
     log::info!("Disconnected, program terminated");
     Ok(())

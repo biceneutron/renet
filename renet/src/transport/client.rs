@@ -2,16 +2,19 @@ use std::{
     io,
     net::{SocketAddr, UdpSocket},
     sync::mpsc::{Receiver, TryRecvError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use renetcode::{
     ConnectToken, DisconnectReason, NetcodeClient, NetcodeError, NETCODE_KEY_BYTES, NETCODE_MAX_PACKET_BYTES, NETCODE_USER_DATA_BYTES,
 };
 
+use str0m::RtcError;
+use str0m::{net::Receive, Input, Rtc};
+
 use crate::remote_connection::RenetClient;
 
-use super::NetcodeTransportError;
+use super::{NetcodeTransportError, Propagated, Str0mClient};
 
 // webrtc
 use std::sync::Arc;
@@ -50,17 +53,15 @@ pub struct NetcodeClientTransport {
     netcode_client: NetcodeClient,
     buffer: [u8; NETCODE_MAX_PACKET_BYTES],
 
-    peer_connection: Arc<RTCPeerConnection>,
-    data_channel: Arc<RTCDataChannel>,
+    str0m_client: Str0mClient,
 }
 
 impl NetcodeClientTransport {
-    pub async fn new(
+    pub fn new(
         current_time: Duration,
         authentication: ClientAuthentication,
         socket: UdpSocket,
-        peer_connection: Arc<RTCPeerConnection>,
-        data_channel: Arc<RTCDataChannel>,
+        str0m_client: Str0mClient,
     ) -> Result<Self, NetcodeError> {
         socket.set_nonblocking(true)?;
         let connect_token: ConnectToken = match authentication {
@@ -88,8 +89,7 @@ impl NetcodeClientTransport {
             buffer: [0u8; NETCODE_MAX_PACKET_BYTES],
             socket,
             netcode_client,
-            peer_connection,
-            data_channel,
+            str0m_client,
         })
     }
 
@@ -122,7 +122,7 @@ impl NetcodeClientTransport {
     /// Disconnect the client from the transport layer.
     /// This sends the disconnect packet instantly, use this when closing/exiting games,
     /// should use [RenetClient::disconnect][crate::RenetClient::disconnect] otherwise.
-    pub async fn disconnect(&mut self) {
+    pub fn disconnect(&mut self) {
         if self.netcode_client.is_disconnected() {
             return;
         }
@@ -130,13 +130,13 @@ impl NetcodeClientTransport {
         match self.netcode_client.disconnect() {
             Ok((addr, packet)) => {
                 println!(
-                    "data channel actively sending disconnect packet {} bytes, to {:?}",
+                    "str0m channel actively sending disconnect packet {} bytes, to {:?}",
                     packet.len(),
                     addr
                 );
-                if let Err(e) = self.data_channel.send(&Bytes::copy_from_slice(packet)).await {
+                if let Err(e) = channel_send(&mut self.str0m_client, packet) {
                     log::error!("Failed to send disconnect packet: {e}");
-                }
+                };
             }
             Err(e) => log::error!("Failed to generate disconnect packet: {e}"),
         }
@@ -149,7 +149,7 @@ impl NetcodeClientTransport {
 
     /// Send packets to the server.
     /// Should be called every tick
-    pub async fn send_packets(&mut self, connection: &mut RenetClient) -> Result<(), NetcodeTransportError> {
+    pub fn send_packets(&mut self, connection: &mut RenetClient) -> Result<(), NetcodeTransportError> {
         if let Some(reason) = self.netcode_client.disconnect_reason() {
             return Err(NetcodeError::Disconnected(reason).into());
         }
@@ -158,20 +158,15 @@ impl NetcodeClientTransport {
         for packet in packets {
             let (addr, payload) = self.netcode_client.generate_payload_packet(&packet)?;
 
-            println!("send_packets: data channel sending {} bytes, to {:?}", payload.len(), addr);
-            self.data_channel.send(&Bytes::copy_from_slice(payload)).await?;
+            println!("send_packets: str0m channel sending {} bytes, to {:?}", payload.len(), addr);
+            channel_send(&mut self.str0m_client, payload)?;
         }
 
         Ok(())
     }
 
     /// Advances the transport by the duration, and receive packets from the network.
-    pub async fn update(
-        &mut self,
-        duration: Duration,
-        client: &mut RenetClient,
-        rx: &Receiver<Vec<u8>>,
-    ) -> Result<(), NetcodeTransportError> {
+    pub fn update(&mut self, duration: Duration, client: &mut RenetClient, rx: &Receiver<Vec<u8>>) -> Result<(), NetcodeTransportError> {
         if let Some(reason) = self.netcode_client.disconnect_reason() {
             // Mark the client as disconnected if an error occured in the transport layer
             if !client.is_disconnected() {
@@ -184,35 +179,88 @@ impl NetcodeClientTransport {
         if let Some(error) = client.disconnect_reason() {
             let (addr, disconnect_packet) = self.netcode_client.disconnect()?;
             println!(
-                "data channel sending disconnect packet {} bytes, to {:?}",
+                "str0m channel sending disconnect packet {} bytes, to {:?}",
                 disconnect_packet.len(),
                 addr
             );
             // self.socket.send_to(disconnect_packet, addr)?;
-            self.data_channel.send(&Bytes::copy_from_slice(disconnect_packet)).await?;
+            channel_send(&mut self.str0m_client, &disconnect_packet)?;
             return Err(error.into());
         }
 
         loop {
-            let mut packet = match rx.try_recv() {
-                Ok(data) => {
-                    println!("##### received packet from mpsc channel");
-                    data
-                }
-                Err(TryRecvError::Empty) => break,
-                _ => panic!("Receiver<Rtc> disconnected"),
+            // str0m handing output events
+            // Poll all clients, and get propagated events as a result.
+            let (_, maybe_data) = if self.str0m_client.rtc.is_alive() {
+                println!("doing poll_output!!!!!!!!!!!");
+                self.str0m_client.poll_output(&self.socket)
+            } else {
+                // #TODO do we need this?
+                (Propagated::Timeout(Instant::now()), None)
             };
 
-            if let Some(payload) = self.netcode_client.process_packet(&mut packet) {
-                client.process_packet(payload);
+            let addr = self.str0m_client.get_send_addr();
+            match (maybe_data, addr) {
+                (Some(mut data), Some((_, socket_dest))) => {
+                    // renet
+                    println!(
+                        "after being processed by str0m, {} bytes go in to renet, from {:?}",
+                        data.len(),
+                        socket_dest
+                    );
+                    // let buf = &mut data.to_vec();
+                    if let Some(payload) = self.netcode_client.process_packet(&mut data) {
+                        client.process_packet(payload);
+                    }
+                }
+                (Some(data), None) => {
+                    println!("FUCK!! NO ADDRESS!!!!, data: {}", data.len());
+                }
+                (None, Some((_, dest))) => {
+                    println!("FUCK!! NO DATA!!!!, address: {}", dest);
+                }
+                _ => {
+                    println!("FUCK!! YIU GOT NOTHING!!!");
+                }
             }
+
+            // No need to propagate (?)
+            // propagate(&mut [self.str0m_client], vec![to_propagate]);
+
+            match self.socket.recv_from(&mut self.buffer) {
+                Ok((len, addr)) => {
+                    println!("##### udp socket received {} bytes, from {:?}", len, addr);
+                    // str0m
+                    let buf = self.buffer.clone();
+                    if let Ok(contents) = buf[..len].try_into() {
+                        // println!("{} bytes handled by str0m", contents., addr);
+                        println!("pass to str0m");
+                        let input = Input::Receive(
+                            Instant::now(),
+                            Receive {
+                                source: addr,
+                                destination: self.socket.local_addr().unwrap(),
+                                contents,
+                            },
+                        );
+
+                        if self.str0m_client.accepts(&input) {
+                            self.str0m_client.handle_input(input);
+                        } else {
+                            log::debug!("Str0m client doesn't accept UDP input: {:?}", input);
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => break,
+                Err(e) => return Err(NetcodeTransportError::IO(e)),
+            };
         }
 
-        if self.is_data_channel_open() {
-            if let Some((packet, addr)) = self.netcode_client.update(duration) {
-                println!("update: data channel sending {} bytes, to {:?}", packet.len(), addr);
-                // self.socket.send_to(packet, addr)?;
-                self.data_channel.send(&Bytes::copy_from_slice(packet)).await?;
+        if let Some((packet, addr)) = self.netcode_client.update(duration) {
+            if is_data_channel_open(&self.str0m_client) {
+                println!("update: str0m channel sending {} bytes, to {:?}", packet.len(), addr);
+                channel_send(&mut self.str0m_client, packet)?;
             }
         }
 
@@ -220,13 +268,45 @@ impl NetcodeClientTransport {
     }
 
     pub fn is_data_channel_open(&self) -> bool {
-        self.data_channel.ready_state() == RTCDataChannelState::Open
+        self.str0m_client.cid.is_some()
     }
 
-    pub async fn close_rtc(&self) -> Result<(), NetcodeTransportError> {
-        self.data_channel.close().await?;
-        self.peer_connection.close().await?;
+    pub fn close_rtc(&mut self) {
+        self.str0m_client.rtc.disconnect();
+    }
+}
 
-        Ok(())
+fn is_data_channel_open(client: &Str0mClient) -> bool {
+    client.cid.is_some()
+}
+
+// should be private
+fn channel_send(client: &mut Str0mClient, data: &[u8]) -> Result<usize, NetcodeTransportError> {
+    let mut channel = client.cid.and_then(|id| client.rtc.channel(id)).expect("channel to be open");
+    channel.write(true, data).map_err(Into::into)
+}
+
+fn propagate(client: &mut Str0mClient, to_propagate: Propagated) {
+    let Some(client_id) = to_propagate.client_id() else {
+            // If the event doesn't have a client id, it can't be propagated,
+            // (it's either a noop or a timeout).
+            return
+        };
+
+    if client.id == client_id {
+        // Do not propagate to originating client.
+        return;
+    }
+
+    match &to_propagate {
+        Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
+        Propagated::MediaData(_, data) => client.handle_media_data(client_id, data),
+        Propagated::KeyframeRequest(_, req, origin, mid_in) => {
+            // Only one origin client handles the keyframe request.
+            if *origin == client.id {
+                client.handle_keyframe_request(*req, *mid_in)
+            }
+        }
+        Propagated::Noop | Propagated::Timeout(_) => {}
     }
 }

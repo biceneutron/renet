@@ -15,6 +15,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::ops::Deref;
 use std::sync::{Arc, Weak};
 use std::time::Instant;
+use str0m::RtcError;
 pub use webrtc::Error as WebRTCError;
 
 // str0m
@@ -33,7 +34,7 @@ pub enum NetcodeTransportError {
     Netcode(NetcodeError),
     Renet(crate::DisconnectReason),
     IO(std::io::Error),
-    WebRTC(WebRTCError),
+    Rtc(RtcError),
 }
 
 impl Error for NetcodeTransportError {}
@@ -44,7 +45,7 @@ impl fmt::Display for NetcodeTransportError {
             NetcodeTransportError::Netcode(ref err) => err.fmt(fmt),
             NetcodeTransportError::Renet(ref err) => err.fmt(fmt),
             NetcodeTransportError::IO(ref err) => err.fmt(fmt),
-            NetcodeTransportError::WebRTC(ref err) => err.fmt(fmt),
+            NetcodeTransportError::Rtc(ref err) => err.fmt(fmt),
         }
     }
 }
@@ -73,9 +74,9 @@ impl From<std::io::Error> for NetcodeTransportError {
     }
 }
 
-impl From<WebRTCError> for NetcodeTransportError {
-    fn from(inner: WebRTCError) -> Self {
-        NetcodeTransportError::WebRTC(inner)
+impl From<RtcError> for NetcodeTransportError {
+    fn from(inner: RtcError) -> Self {
+        NetcodeTransportError::Rtc(inner)
     }
 }
 
@@ -132,7 +133,7 @@ impl TrackOut {
 }
 
 impl Str0mClient {
-    fn new(client_id: u64, rtc: Rtc) -> Str0mClient {
+    pub fn new(client_id: u64, rtc: Rtc) -> Str0mClient {
         // static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         // let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
         Str0mClient {
@@ -163,15 +164,20 @@ impl Str0mClient {
     }
 
     fn poll_output(&mut self, socket: &UdpSocket) -> (Propagated, Option<Vec<u8>>) {
+        println!("poll_output 1");
         if !self.rtc.is_alive() {
             return (Propagated::Noop, None);
         }
+
+        println!("poll_output 2");
 
         // Incoming tracks from other clients cause new entries in track_out that
         // need SDP negotiation with the remote peer.
         if self.negotiate_if_needed() {
             return (Propagated::Noop, None);
         }
+
+        println!("poll_output 3");
 
         match self.rtc.poll_output() {
             Ok(output) => self.handle_output(output, socket),
@@ -186,11 +192,11 @@ impl Str0mClient {
     fn handle_output(&mut self, output: Output, socket: &UdpSocket) -> (Propagated, Option<Vec<u8>>) {
         match output {
             Output::Transmit(transmit) => {
-                // println!(
-                //     "handle_output Output::Transmit, {}, {}",
-                //     String::from_utf8(transmit.contents.to_vec()).unwrap_or("".to_string()),
-                //     transmit.destination
-                // );
+                println!(
+                    "handle_output Output::Transmit, {}, {}",
+                    transmit.contents.to_vec().len(),
+                    transmit.destination
+                );
                 // println!("handle_output Output::Transmit, {}", transmit.destination);
                 // let data = "SERVER MESSAGE".as_bytes();
                 socket
@@ -200,7 +206,7 @@ impl Str0mClient {
                 (Propagated::Noop, None)
             }
             Output::Timeout(t) => {
-                // println!("handle_output Output::Timeout");
+                println!("handle_output Output::Timeout");
                 (Propagated::Timeout(t), None)
             }
             Output::Event(e) => match e {

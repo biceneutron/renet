@@ -199,6 +199,7 @@ impl NetcodeClient {
                 self.state = ClientState::Connected;
             }
             (Packet::Payload(p), ClientState::Connected) => {
+                println!("Packet::Payload!!!!!!! len = {}", p.len());
                 self.last_packet_received_time = self.current_time;
                 return Some(p);
             }

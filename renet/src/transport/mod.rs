@@ -164,20 +164,15 @@ impl Str0mClient {
     }
 
     fn poll_output(&mut self, socket: &UdpSocket) -> (Propagated, Option<Vec<u8>>) {
-        println!("poll_output 1");
         if !self.rtc.is_alive() {
             return (Propagated::Noop, None);
         }
 
-        println!("poll_output 2");
-
         // Incoming tracks from other clients cause new entries in track_out that
         // need SDP negotiation with the remote peer.
-        if self.negotiate_if_needed() {
-            return (Propagated::Noop, None);
-        }
-
-        println!("poll_output 3");
+        // if self.negotiate_if_needed() {
+        //     return (Propagated::Noop, None);
+        // }
 
         match self.rtc.poll_output() {
             Ok(output) => self.handle_output(output, socket),
@@ -502,13 +497,13 @@ impl Propagated {
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct ICEResponse {
+pub struct SignalingResponse {
     pub sdp: String,
     pub client_id: u64,
 }
 
-impl ICEResponse {
-    pub fn new(sdp: String, client_id: u64) -> ICEResponse {
-        ICEResponse { sdp, client_id }
+impl SignalingResponse {
+    pub fn new(sdp: String, client_id: u64) -> SignalingResponse {
+        SignalingResponse { sdp, client_id }
     }
 }

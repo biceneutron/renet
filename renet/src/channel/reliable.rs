@@ -226,7 +226,11 @@ impl SendChannelReliable {
     }
 
     pub fn process_slice_message_ack(&mut self, message_id: u64, slice_index: usize) {
-        println!("process_slice_message_ack, self.unacked_messages: {}", self.unacked_messages.len());
+        println!(
+            "process_slice_message_ack, message_id: {}, self.unacked_messages: {}",
+            message_id,
+            self.unacked_messages.len()
+        );
         let Some(unacked_message) = self.unacked_messages.get_mut(&message_id) else {
             return;
         };

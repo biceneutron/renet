@@ -1,7 +1,6 @@
 use std::{
     io,
     net::{SocketAddr, UdpSocket},
-    sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
 };
 
@@ -9,22 +8,11 @@ use renetcode::{
     ConnectToken, DisconnectReason, NetcodeClient, NetcodeError, NETCODE_KEY_BYTES, NETCODE_MAX_PACKET_BYTES, NETCODE_USER_DATA_BYTES,
 };
 
-use str0m::RtcError;
-use str0m::{net::Receive, Input, Rtc};
+use str0m::{net::Receive, Input};
 
 use crate::remote_connection::RenetClient;
 
 use super::{NetcodeTransportError, Propagated, Str0mClient};
-
-// webrtc
-use std::sync::Arc;
-use webrtc::{
-    data_channel::{data_channel_state::RTCDataChannelState, RTCDataChannel},
-    peer_connection::RTCPeerConnection,
-};
-
-// for develop
-use bytes::Bytes;
 
 /// Configuration to establish an secure ou unsecure connection with the server.
 #[derive(Debug)]
@@ -166,7 +154,7 @@ impl NetcodeClientTransport {
     }
 
     /// Advances the transport by the duration, and receive packets from the network.
-    pub fn update(&mut self, duration: Duration, client: &mut RenetClient, rx: &Receiver<Vec<u8>>) -> Result<(), NetcodeTransportError> {
+    pub fn update(&mut self, duration: Duration, client: &mut RenetClient) -> Result<(), NetcodeTransportError> {
         if let Some(reason) = self.netcode_client.disconnect_reason() {
             // Mark the client as disconnected if an error occured in the transport layer
             if !client.is_disconnected() {
@@ -191,8 +179,7 @@ impl NetcodeClientTransport {
         loop {
             // str0m handing output events
             // Poll all clients, and get propagated events as a result.
-            let (_, maybe_data) = if self.str0m_client.rtc.is_alive() {
-                println!("doing poll_output!!!!!!!!!!!");
+            let (to_propagate, maybe_data) = if self.str0m_client.rtc.is_alive() {
                 self.str0m_client.poll_output(&self.socket)
             } else {
                 // #TODO do we need this?
@@ -213,19 +200,12 @@ impl NetcodeClientTransport {
                         client.process_packet(payload);
                     }
                 }
-                (Some(data), None) => {
-                    println!("FUCK!! NO ADDRESS!!!!, data: {}", data.len());
-                }
-                (None, Some((_, dest))) => {
-                    println!("FUCK!! NO DATA!!!!, address: {}", dest);
-                }
-                _ => {
-                    println!("FUCK!! YIU GOT NOTHING!!!");
-                }
+                _ => {}
             }
 
-            // No need to propagate (?)
-            // propagate(&mut [self.str0m_client], vec![to_propagate]);
+            if to_propagate.as_timeout().is_none() {
+                continue;
+            }
 
             match self.socket.recv_from(&mut self.buffer) {
                 Ok((len, addr)) => {
@@ -235,6 +215,7 @@ impl NetcodeClientTransport {
                     if let Ok(contents) = buf[..len].try_into() {
                         // println!("{} bytes handled by str0m", contents., addr);
                         println!("pass to str0m");
+
                         let input = Input::Receive(
                             Instant::now(),
                             Receive {
@@ -264,6 +245,9 @@ impl NetcodeClientTransport {
             }
         }
 
+        let now = Instant::now();
+        self.str0m_client.handle_input(Input::Timeout(now));
+
         Ok(())
     }
 
@@ -284,29 +268,4 @@ fn is_data_channel_open(client: &Str0mClient) -> bool {
 fn channel_send(client: &mut Str0mClient, data: &[u8]) -> Result<usize, NetcodeTransportError> {
     let mut channel = client.cid.and_then(|id| client.rtc.channel(id)).expect("channel to be open");
     channel.write(true, data).map_err(Into::into)
-}
-
-fn propagate(client: &mut Str0mClient, to_propagate: Propagated) {
-    let Some(client_id) = to_propagate.client_id() else {
-            // If the event doesn't have a client id, it can't be propagated,
-            // (it's either a noop or a timeout).
-            return
-        };
-
-    if client.id == client_id {
-        // Do not propagate to originating client.
-        return;
-    }
-
-    match &to_propagate {
-        Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
-        Propagated::MediaData(_, data) => client.handle_media_data(client_id, data),
-        Propagated::KeyframeRequest(_, req, origin, mid_in) => {
-            // Only one origin client handles the keyframe request.
-            if *origin == client.id {
-                client.handle_keyframe_request(*req, *mid_in)
-            }
-        }
-        Propagated::Noop | Propagated::Timeout(_) => {}
-    }
 }

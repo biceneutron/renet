@@ -96,7 +96,6 @@ impl<'a> Packet<'a> {
     }
 
     pub fn connection_request_from_token(connect_token: &ConnectToken) -> Self {
-        println!("connection_request_from_token");
         Packet::ConnectionRequest {
             xnonce: connect_token.xnonce,
             version_info: *NETCODE_VERSION_INFO,
@@ -167,22 +166,15 @@ impl<'a> Packet<'a> {
             return Ok(Packet::Payload(src));
         }
 
-        println!("packet_type {:?}, bytes length {}", packet_type, src.len());
         let src = &mut Cursor::new(src);
 
         match packet_type {
             PacketType::ConnectionRequest => {
-                println!("hi there");
                 let version_info = read_bytes(src)?;
-                println!("hi there 2");
                 let protocol_id = read_u64(src)?;
-                println!("hi there 3");
                 let expire_timestamp = read_u64(src)?;
-                println!("hi there 4");
                 let xnonce = read_bytes(src)?;
-                println!("hi there 5");
                 let token_data = read_bytes(src)?;
-                println!("hi there 6");
 
                 Ok(Packet::ConnectionRequest {
                     version_info,
@@ -273,8 +265,6 @@ impl<'a> Packet<'a> {
         let prefix_byte = buffer[0];
         let (packet_type, sequence_len) = decode_prefix(prefix_byte);
         let packet_type = PacketType::from_u8(packet_type)?;
-
-        println!("packet_type {:?}", packet_type);
 
         if matches!(packet_type, PacketType::ConnectionRequest) {
             Ok((0, Packet::read(PacketType::ConnectionRequest, &buffer[1..])?))

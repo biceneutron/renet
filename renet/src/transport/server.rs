@@ -9,7 +9,7 @@ use renetcode::{NetcodeServer, ServerResult, NETCODE_KEY_BYTES, NETCODE_MAX_PACK
 
 use crate::server::RenetServer;
 
-use super::{NetcodeTransportError, Propagated, Str0mClient, Str0mClientId};
+use super::{NetcodeTransportError, Str0mClient, Str0mClientId, Str0mOutput};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Instant;
 use str0m::{net::Receive, Input, Rtc};
@@ -137,41 +137,49 @@ impl NetcodeServerTransport {
         loop {
             // str0m handing output events
             // Poll all clients, and get propagated events as a result.
-            let to_propagate: Vec<_> = self
+            let outputs: Vec<_> = self
                 .str0m_clients
                 .iter_mut()
                 .map(|c| {
                     if !c.rtc.is_alive() {
-                        return Propagated::Timeout(Instant::now());
+                        return Str0mOutput::Timeout(Instant::now());
                     }
 
                     if let Some((_, destination)) = c.get_send_addr() {
                         self.datachannel_mapping.entry(c.id).or_insert_with(|| destination);
                     }
 
-                    let (propagated, maybe_data) = c.poll_output(&self.socket);
-                    if maybe_data.is_some() && self.datachannel_mapping.contains_key(&c.id) {
-                        let source = self.datachannel_mapping.get(&c.id).unwrap();
-                        let data = maybe_data.unwrap();
-
-                        // renet
-                        println!(
-                            "after being processed by str0m, {} bytes go in to renet, from {:?}",
-                            data.len(),
-                            source
-                        );
-                        let buf = &mut data.to_vec();
-                        let server_result = self.netcode_server.process_packet(*source, buf);
-                        handle_server_result(server_result, c, server);
+                    let output = c.poll_output(&self.socket);
+                    match (output.clone(), self.datachannel_mapping.get(&c.id)) {
+                        (Str0mOutput::Data(mut data), Some(source)) => {
+                            // let buf = &mut data.to_vec();
+                            let server_result = self.netcode_server.process_packet(*source, &mut data);
+                            handle_server_result(server_result, c, server);
+                        }
+                        _ => {}
                     }
-                    return propagated;
+                    // if let Str0mOutput::Data(data) = output && self.datachannel_mapping.contains_key(&c.id) {
+                    //     let source = self.datachannel_mapping.get(&c.id).unwrap();
+                    //     let data = maybe_data.unwrap();
+
+                    //     // renet
+                    //     println!(
+                    //         "after being processed by str0m, {} bytes go in to renet, from {:?}",
+                    //         data.len(),
+                    //         source
+                    //     );
+                    //     let buf = &mut data.to_vec();
+                    //     let server_result = self.netcode_server.process_packet(*source, buf);
+                    //     handle_server_result(server_result, c, server);
+                    // }
+                    return output;
                 })
                 .collect();
-            let timeouts: Vec<_> = to_propagate.iter().filter_map(|p| p.as_timeout()).collect();
+            let timeouts: Vec<_> = outputs.iter().filter_map(|p| p.as_timeout()).collect();
 
             // We keep propagating client events until all clients respond with a timeout.
-            if to_propagate.len() > timeouts.len() {
-                propagate(&mut self.str0m_clients, to_propagate);
+            if outputs.len() > timeouts.len() {
+                // propagate(&mut self.str0m_clients, to_propagate);
                 // Start over to propagate more client data until all are timeouts.
                 continue;
             }
@@ -181,7 +189,7 @@ impl NetcodeServerTransport {
                     // str0m
                     let buf = self.buffer.clone();
                     if let Ok(contents) = buf[..len].try_into() {
-                        println!("udp socket received {} bytes, from {:?}, handled by str0m", len, source);
+                        log::debug!("UDP socket received {} bytes from {:?}", len, source);
                         let input = Input::Receive(
                             Instant::now(),
                             Receive {
@@ -194,7 +202,7 @@ impl NetcodeServerTransport {
                         if let Some(client) = self.str0m_clients.iter_mut().find(|c| c.accepts(&input)) {
                             client.handle_input(input);
                         } else {
-                            log::debug!("No client accepts UDP input: {:?}", input);
+                            log::warn!("No str0m client accepts the incoming packet: {:?}", input);
                         }
                     }
                 }
@@ -247,7 +255,9 @@ impl NetcodeServerTransport {
                                 .cid
                                 .and_then(|id| str0m_client.rtc.channel(id))
                                 .expect("channel to be open");
-                            println!("str0m channel sending {} bytes, to {:?}", payload.len(), addr);
+
+                            log::debug!("Data channel sending {} bytes to {:?}", payload.len(), addr);
+
                             if let Err(err) = channel.write(true, payload) {
                                 log::error!("Failed to send packet to {addr}: {err}");
                             }
@@ -290,7 +300,11 @@ fn handle_server_result(server_result: ServerResult, client: &mut Str0mClient, r
     // channel.write(false, &d.data).expect("to write answer");
     let mut channel = client.cid.and_then(|id| client.rtc.channel(id)).expect("channel to be open");
     let mut send_packet = |packet: &[u8], addr: SocketAddr| {
-        println!("str0m channel sending {} bytes, to {:?}", packet.len(), addr);
+        log::debug!(
+            "Data channel sending {} bytes to {:?} while handling server result",
+            packet.len(),
+            addr
+        );
         if let Err(err) = channel.write(true, packet) {
             log::error!("Failed to send packet to {addr}: {err}");
         }
@@ -299,11 +313,9 @@ fn handle_server_result(server_result: ServerResult, client: &mut Str0mClient, r
     match server_result {
         ServerResult::None => {}
         ServerResult::PacketToSend { payload, addr } => {
-            println!("Handling ServerResult::PacketToSend");
             send_packet(payload, addr);
         }
         ServerResult::Payload { client_id, payload } => {
-            println!("Handling ServerResult::Payload");
             if let Err(e) = reliable_server.process_packet_from(payload, client_id) {
                 log::error!("Error while processing payload for {}: {}", client_id, e);
             }
@@ -314,12 +326,10 @@ fn handle_server_result(server_result: ServerResult, client: &mut Str0mClient, r
             addr,
             payload,
         } => {
-            println!("Handling ServerResult::ClientConnected");
             reliable_server.add_connection(client_id);
             send_packet(payload, addr);
         }
         ServerResult::ClientDisconnected { client_id, addr, payload } => {
-            println!("Handling ServerResult::ClientDisconnected");
             reliable_server.remove_connection(client_id);
             if let Some(payload) = payload {
                 send_packet(payload, addr);
@@ -328,31 +338,31 @@ fn handle_server_result(server_result: ServerResult, client: &mut Str0mClient, r
     }
 }
 
-fn propagate(clients: &mut [Str0mClient], to_propagate: Vec<Propagated>) {
-    for p in to_propagate {
-        let Some(client_id) = p.client_id() else {
-            // If the event doesn't have a client id, it can't be propagated,
-            // (it's either a noop or a timeout).
-            continue;
-        };
+// fn propagate(clients: &mut [Str0mClient], to_propagate: Vec<Propagated>) {
+//     for p in to_propagate {
+//         let Some(client_id) = p.client_id() else {
+//             // If the event doesn't have a client id, it can't be propagated,
+//             // (it's either a noop or a timeout).
+//             continue;
+//         };
 
-        for client in &mut *clients {
-            if client.id == client_id {
-                // Do not propagate to originating client.
-                continue;
-            }
+//         for client in &mut *clients {
+//             if client.id == client_id {
+//                 // Do not propagate to originating client.
+//                 continue;
+//             }
 
-            match &p {
-                Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
-                Propagated::MediaData(_, data) => client.handle_media_data(client_id, data),
-                Propagated::KeyframeRequest(_, req, origin, mid_in) => {
-                    // Only one origin client handles the keyframe request.
-                    if *origin == client.id {
-                        client.handle_keyframe_request(*req, *mid_in)
-                    }
-                }
-                Propagated::Noop | Propagated::Timeout(_) => {}
-            }
-        }
-    }
-}
+//             match &p {
+//                 Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
+//                 Propagated::MediaData(_, data) => client.handle_media_data(client_id, data),
+//                 Propagated::KeyframeRequest(_, req, origin, mid_in) => {
+//                     // Only one origin client handles the keyframe request.
+//                     if *origin == client.id {
+//                         client.handle_keyframe_request(*req, *mid_in)
+//                     }
+//                 }
+//                 Propagated::Noop | Propagated::Timeout(_) => {}
+//             }
+//         }
+//     }
+// }

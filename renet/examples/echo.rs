@@ -59,8 +59,6 @@ impl Username {
 
 #[tokio::main]
 async fn main() {
-    // env_logger::init();
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
     println!("Usage: server [SERVER_PORT] or client [SERVER_PORT] [USER_NAME]");
     let args: Vec<String> = std::env::args().collect();
 
@@ -83,7 +81,7 @@ async fn main() {
 const PROTOCOL_ID: u64 = 7;
 
 async fn client(username: Username) {
-    // env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
     let local_addr = Ipv4Addr::new(127, 0, 0, 1);
     let udp_port = rand::thread_rng().gen_range(50000..=65535);
@@ -102,8 +100,7 @@ async fn client(username: Username) {
     };
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let mut client = RenetClient::new(ConnectionConfig::default());
-    let str0m_client = Str0mClient::new(client_id, rtc);
-    let mut transport = NetcodeClientTransport::new(current_time, authentication, socket, str0m_client).unwrap();
+    let mut transport = NetcodeClientTransport::new(current_time, authentication, socket, Str0mClient::new(client_id, rtc)).unwrap();
 
     let mut last_updated = Instant::now();
     let mut packet_seq = 0;
@@ -116,7 +113,7 @@ async fn client(username: Username) {
         // Receive new messages and update client
         client.update(duration);
         if let Err(e) = transport.update(duration, &mut client) {
-            log::error!("transport update error {e}");
+            log::warn!("Failed updating transport layer: {e}");
             break;
         };
 
@@ -135,7 +132,7 @@ async fn client(username: Username) {
                 log::info!("Sending user data '{message}'");
                 client.send_message(DefaultChannel::Unreliable, message.as_bytes().to_vec());
             }
-            if packet_seq == 230 {
+            if packet_seq == 220 {
                 transport.disconnect();
             }
             packet_seq += 1;
@@ -146,7 +143,7 @@ async fn client(username: Username) {
             match transport.send_packets(&mut client) {
                 Ok(()) => {}
                 Err(e) => {
-                    log::error!("Renet failed sending: {e}")
+                    log::warn!("Renet failed sending: {e}")
                 }
             };
         }
@@ -159,6 +156,8 @@ async fn client(username: Username) {
 }
 
 fn server(public_addr: SocketAddr) {
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+
     let connection_config = ConnectionConfig::default();
     let mut server: RenetServer = RenetServer::new(connection_config);
 
@@ -174,20 +173,13 @@ fn server(public_addr: SocketAddr) {
     let mut transport = NetcodeServerTransport::new(current_time, server_config, socket).unwrap();
 
     let mut usernames: HashMap<u64, String> = HashMap::new();
-    // let mut received_messages = vec![];
     let mut last_updated = Instant::now();
 
     let (tx, rx) = mpsc::sync_channel(1);
 
     // HTTP server
     thread::spawn(move || {
-        let server = Server::new(
-            "127.0.0.1:8080",
-            move |request| web_request(request, addr, tx.clone()),
-            // certificate,
-            // private_key,
-        )
-        .expect("starting the web server");
+        let server = Server::new("127.0.0.1:8080", move |request| web_request(request, addr, tx.clone())).expect("starting the web server");
 
         let port = server.server_addr().port();
         log::info!("Connect a browser to https://{:?}:{:?}", addr.ip(), port);
@@ -197,8 +189,6 @@ fn server(public_addr: SocketAddr) {
 
     let mut packet_seq = 0;
     loop {
-        // println!("#### num of str0m clients: {}", transport.get_num_str0mclients());
-
         let now = Instant::now();
         let duration = now - last_updated;
         last_updated = now;
@@ -206,9 +196,7 @@ fn server(public_addr: SocketAddr) {
         transport.spawn_new_client(&rx);
 
         server.update(duration);
-        transport.update(duration, &mut server).unwrap(); // receive msg
-
-        // received_messages.clear();
+        transport.update(duration, &mut server).unwrap();
 
         while let Some(event) = server.get_event() {
             match event {
@@ -216,10 +204,10 @@ fn server(public_addr: SocketAddr) {
                     let user_data = transport.user_data(client_id).unwrap();
                     let username = Username::from_user_data(&user_data);
                     usernames.insert(client_id, username.0);
-                    println!("Client {} connected.", client_id)
+                    log::info!("Client {} connected.", client_id)
                 }
                 ServerEvent::ClientDisconnected { client_id, reason } => {
-                    println!("Client {} disconnected: {}", client_id, reason);
+                    log::info!("Client {} disconnected: {}", client_id, reason);
                     usernames.remove_entry(&client_id);
                 }
             }
@@ -230,12 +218,14 @@ fn server(public_addr: SocketAddr) {
             while let Some(message) = server.receive_message(client_id, DefaultChannel::Unreliable) {
                 let text = String::from_utf8(message.into()).unwrap();
                 let username = usernames.get(&client_id).unwrap();
-                println!("Client {} ({}) sent text: {}", username, client_id, text);
-                // let text = format!("{}: {}", username, text);
-                // received_messages.push(text);
+                log::info!("Client {} ({}) sent text: {}", username, client_id, text);
 
-                println!("Echoing back {}", text);
-                server.send_message(client_id, DefaultChannel::Unreliable, text.as_bytes().to_vec());
+                log::info!("Echoing back {}", text);
+                server.send_message(
+                    client_id,
+                    DefaultChannel::Unreliable,
+                    format!("{}_{}", username, text).as_bytes().to_vec(),
+                );
             }
 
             // if packet_seq <= 200 && packet_seq % 10 == 0 {
@@ -299,11 +289,10 @@ async fn create_rtc(local_addr: SocketAddr) -> (Rtc, u64) {
 }
 
 fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<(u64, Rtc)>) -> Response {
-    println!("Got web_request");
+    log::info!("HTTP server got one request");
 
     static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
     let client_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-    println!("using client id {}", client_id);
 
     if request.method() == "GET" {
         return Response::empty_204();
@@ -317,14 +306,14 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<(u64, Rtc)>) 
         panic!("error parsing HTTP request {}", e);
     }
 
-    // println!("offer sdp {}", req_data);
-
     let offer = match SdpOffer::from_sdp_string(&req_data) {
         Ok(sdp) => sdp,
-        Err(e) => return Response::empty_400(),
+        Err(e) => {
+            log::error!("Failed to parse SDP offer: {}", e);
+            return Response::empty_400();
+        }
     };
 
-    // let offer: SdpOffer = serde_json::from_reader(&mut data).expect("serialized offer");
     let mut rtc = Rtc::builder()
         // Uncomment this to see statistics
         // .set_stats_interval(Some(Duration::from_secs(1)))
@@ -338,13 +327,9 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<(u64, Rtc)>) 
     // Create an SDP Answer.
     let answer = rtc.sdp_api().accept_offer(offer).expect("offer to be accepted");
 
-    println!("showing the source in the first place...");
-    rtc.show_send_addr();
-
     // The Rtc instance is shipped off to the main run loop.
     tx.send((client_id, rtc)).expect("to send Rtc instance");
 
-    // let body = serde_json::to_vec(&answer).expect("answer to serialize");
     let response = match serde_json::to_string(&SignalingResponse::new(answer.to_sdp_string(), client_id)) {
         Ok(res) => res,
         Err(e) => return Response::text(format!("Server failed creating answer SDP: {}", e)).with_status_code(500),

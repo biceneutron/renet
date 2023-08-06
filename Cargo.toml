@@ -3,7 +3,6 @@ members = [
     "renet",
     "demo_chat",
     "demo_bevy",
-    "demo_webrtc",
     "renetcode",
     "bevy_renet",
     "renet_visualizer",

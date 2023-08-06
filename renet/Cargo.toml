@@ -24,11 +24,9 @@ renetcode = { path = "../renetcode", version = "0.0.9", optional = true }
 # str0m = { git = "https://github.com/algesten/str0m.git"}
 str0m = { git = "https://github.com/biceneutron/str0m.git", branch = "test/add-log" }
 # str0m = { path = "../../str0m" }
-webrtc = "0.8.0"
 # for develop
 tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread"] }
 hyper = { version = "0.14", features = ["full"] }
-# rouille = { version = "3.5.0", features = ["ssl"] }
 serde_json = "1.0"
 serde = { version = "1.0.102", features = ["derive"] }
 lazy_static = "1.4"

@@ -12,7 +12,7 @@ use str0m::{net::Receive, Input};
 
 use crate::remote_connection::RenetClient;
 
-use super::{NetcodeTransportError, Propagated, Str0mClient};
+use super::{NetcodeTransportError, Str0mClient, Str0mOutput};
 
 /// Configuration to establish an secure ou unsecure connection with the server.
 #[derive(Debug)]
@@ -117,8 +117,8 @@ impl NetcodeClientTransport {
 
         match self.netcode_client.disconnect() {
             Ok((addr, packet)) => {
-                println!(
-                    "str0m channel actively sending disconnect packet {} bytes, to {:?}",
+                log::debug!(
+                    "Data channel actively sending {} bytes of disconnection packet to {:?}",
                     packet.len(),
                     addr
                 );
@@ -146,7 +146,7 @@ impl NetcodeClientTransport {
         for packet in packets {
             let (addr, payload) = self.netcode_client.generate_payload_packet(&packet)?;
 
-            println!("send_packets: str0m channel sending {} bytes, to {:?}", payload.len(), addr);
+            log::debug!("Data channel sending {} bytes to {:?}", payload.len(), addr);
             channel_send(&mut self.str0m_client, payload)?;
         }
 
@@ -166,56 +166,42 @@ impl NetcodeClientTransport {
 
         if let Some(error) = client.disconnect_reason() {
             let (addr, disconnect_packet) = self.netcode_client.disconnect()?;
-            println!(
-                "str0m channel sending disconnect packet {} bytes, to {:?}",
+            log::debug!(
+                "Data channel sending {} bytes of disconnection packet to {:?}",
                 disconnect_packet.len(),
                 addr
             );
-            // self.socket.send_to(disconnect_packet, addr)?;
+
             channel_send(&mut self.str0m_client, &disconnect_packet)?;
             return Err(error.into());
         }
 
         loop {
-            // str0m handing output events
-            // Poll all clients, and get propagated events as a result.
-            let (to_propagate, maybe_data) = if self.str0m_client.rtc.is_alive() {
+            let output = if self.str0m_client.rtc.is_alive() {
                 self.str0m_client.poll_output(&self.socket)
             } else {
-                // #TODO do we need this?
-                (Propagated::Timeout(Instant::now()), None)
+                break;
             };
 
-            let addr = self.str0m_client.get_send_addr();
-            match (maybe_data, addr) {
-                (Some(mut data), Some((_, socket_dest))) => {
-                    // renet
-                    println!(
-                        "after being processed by str0m, {} bytes go in to renet, from {:?}",
-                        data.len(),
-                        socket_dest
-                    );
-                    // let buf = &mut data.to_vec();
+            // Poll the str0m rtc output until we get timeout
+            // If `maybe_data` is an Option::Some, the data channel must have been opened.
+            match output {
+                Str0mOutput::Timeout(_) => {}
+                Str0mOutput::Data(mut data) => {
                     if let Some(payload) = self.netcode_client.process_packet(&mut data) {
                         client.process_packet(payload);
-                    }
+                    };
+                    continue;
                 }
-                _ => {}
-            }
-
-            if to_propagate.as_timeout().is_none() {
-                continue;
+                Str0mOutput::Noop => continue,
             }
 
             match self.socket.recv_from(&mut self.buffer) {
                 Ok((len, addr)) => {
-                    println!("##### udp socket received {} bytes, from {:?}", len, addr);
-                    // str0m
-                    let buf = self.buffer.clone();
-                    if let Ok(contents) = buf[..len].try_into() {
-                        // println!("{} bytes handled by str0m", contents., addr);
-                        println!("pass to str0m");
+                    log::debug!("UDP socket received {} bytes from {:?}", len, addr);
 
+                    // str0m
+                    if let Ok(contents) = self.buffer[..len].try_into() {
                         let input = Input::Receive(
                             Instant::now(),
                             Receive {
@@ -228,7 +214,7 @@ impl NetcodeClientTransport {
                         if self.str0m_client.accepts(&input) {
                             self.str0m_client.handle_input(input);
                         } else {
-                            log::debug!("Str0m client doesn't accept UDP input: {:?}", input);
+                            log::warn!("Str0m client doesn't accept the incoming packet");
                         }
                     }
                 }
@@ -240,7 +226,7 @@ impl NetcodeClientTransport {
 
         if let Some((packet, addr)) = self.netcode_client.update(duration) {
             if is_data_channel_open(&self.str0m_client) {
-                println!("update: str0m channel sending {} bytes, to {:?}", packet.len(), addr);
+                log::debug!("Data channel sending {} bytes to {:?}", packet.len(), addr);
                 channel_send(&mut self.str0m_client, packet)?;
             }
         }

@@ -358,7 +358,6 @@ impl NetcodeServer {
         }
 
         // Handle connected client
-        println!("looking for connected connection for {}", addr);
         if let Some((slot, client)) = find_client_mut_by_addr(&mut self.clients, addr) {
             let (_, packet) = Packet::decode(
                 buffer,
@@ -366,7 +365,7 @@ impl NetcodeServer {
                 Some(&client.receive_key),
                 Some(&mut client.replay_protection),
             )?;
-            println!(
+            log::trace!(
                 "Received packet from connected client ({}): {:?}",
                 client.client_id,
                 packet.packet_type()
@@ -410,7 +409,6 @@ impl NetcodeServer {
         }
 
         // Handle pending client
-        println!("looking for pending connection for {}", addr);
         if let Some(pending) = self.pending_clients.get_mut(&addr) {
             let (_, packet) = Packet::decode(
                 buffer,
@@ -419,7 +417,7 @@ impl NetcodeServer {
                 Some(&mut pending.replay_protection),
             )?;
             pending.last_packet_received_time = self.current_time;
-            println!("Received packet from pending client ({}): {:?}", addr, packet.packet_type());
+            log::trace!("Received packet from pending client ({}): {:?}", addr, packet.packet_type());
             match packet {
                 Packet::ConnectionRequest {
                     protocol_id,
@@ -471,8 +469,6 @@ impl NetcodeServer {
                             let user_data: [u8; NETCODE_USER_DATA_BYTES] = pending.user_data;
                             self.clients[client_index] = Some(pending);
 
-                            println!("putting new connection!!!");
-
                             return Ok(ServerResult::ClientConnected {
                                 client_id,
                                 addr,
@@ -487,9 +483,7 @@ impl NetcodeServer {
         }
 
         // Handle new client
-        println!("Received packet from new client {}", addr);
         let (_, packet) = Packet::decode(buffer, self.protocol_id, None, None)?;
-        println!("Received packet from new client {}, {:?}", addr, packet.packet_type());
         match packet {
             Packet::ConnectionRequest {
                 data,

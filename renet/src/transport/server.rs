@@ -135,7 +135,6 @@ impl NetcodeServerTransport {
         self.str0m_clients.retain(|c| c.rtc.is_alive());
 
         loop {
-            // str0m handing output events
             // Poll all clients, and get propagated events as a result.
             let outputs: Vec<_> = self
                 .str0m_clients
@@ -158,29 +157,14 @@ impl NetcodeServerTransport {
                         }
                         _ => {}
                     }
-                    // if let Str0mOutput::Data(data) = output && self.datachannel_mapping.contains_key(&c.id) {
-                    //     let source = self.datachannel_mapping.get(&c.id).unwrap();
-                    //     let data = maybe_data.unwrap();
 
-                    //     // renet
-                    //     println!(
-                    //         "after being processed by str0m, {} bytes go in to renet, from {:?}",
-                    //         data.len(),
-                    //         source
-                    //     );
-                    //     let buf = &mut data.to_vec();
-                    //     let server_result = self.netcode_server.process_packet(*source, buf);
-                    //     handle_server_result(server_result, c, server);
-                    // }
                     return output;
                 })
                 .collect();
             let timeouts: Vec<_> = outputs.iter().filter_map(|p| p.as_timeout()).collect();
 
-            // We keep propagating client events until all clients respond with a timeout.
+            // We keep polling clients until all clients respond with a timeout.
             if outputs.len() > timeouts.len() {
-                // propagate(&mut self.str0m_clients, to_propagate);
-                // Start over to propagate more client data until all are timeouts.
                 continue;
             }
 

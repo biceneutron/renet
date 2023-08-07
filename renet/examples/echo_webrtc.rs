@@ -1,9 +1,9 @@
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+    net::{Ipv4Addr, SocketAddr, UdpSocket},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, SyncSender},
+        mpsc::{self, SyncSender, Receiver, TryRecvError},
     },
     thread,
     time::{Duration, Instant, SystemTime},
@@ -27,10 +27,6 @@ use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::{Candidate, Rtc};
 
 const SERVER_URL: &str = "http://127.0.0.1:8080";
-
-const SMALL_MESSAGE: &str = "CLIENT_PACKET";
-const SLICE_MESSAGE: &str =
-    "CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET_CLIENT_PACKET";
 
 // Helper struct to pass an username in the user data
 struct Username(String);
@@ -104,48 +100,38 @@ async fn client(server_addr: SocketAddr, username: Username) {
     let mut client = RenetClient::new(ConnectionConfig::default());
     let mut transport = NetcodeClientTransport::new(current_time, authentication, socket, Str0mClient::new(client_id, rtc)).unwrap();
 
+    let stdin_channel: Receiver<String> = spawn_stdin_channel();
     let mut last_updated = Instant::now();
-    let mut packet_seq = 0;
 
     loop {
         let now = Instant::now();
         let duration = now - last_updated;
         last_updated = now;
 
-        // Receive new messages and update client
         client.update(duration);
         if let Err(e) = transport.update(duration, &mut client) {
             log::warn!("Failed updating transport layer: {e}");
             break;
         };
 
-        // custom-logic
         if transport.is_connected() {
-            // Receive message from server
-            while let Some(message) = client.receive_message(DefaultChannel::Unreliable) {
-                // Handle received message
-                let msg_str = String::from_utf8(message.to_vec()).unwrap();
-                log::info!("Received user data: {msg_str}");
+            match stdin_channel.try_recv() {
+                Ok(text) => client.send_message(DefaultChannel::Unreliable, text.as_bytes().to_vec()),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => panic!("Channel disconnected"),
             }
 
-            // Send message
-            if packet_seq <= 200 && packet_seq % 10 == 0 {
-                let message = format!("{}_{}", SLICE_MESSAGE, packet_seq);
-                log::info!("Sending user data '{message}'");
-                client.send_message(DefaultChannel::Unreliable, message.as_bytes().to_vec());
+            while let Some(text) = client.receive_message(DefaultChannel::Unreliable) {
+                let text = String::from_utf8(text.into()).unwrap();
+                log::info!("Received user data: {}", text);
             }
-            if packet_seq == 220 {
-                transport.disconnect();
-            }
-            packet_seq += 1;
         }
 
-        // Send packets to server
         if transport.is_data_channel_open() {
             match transport.send_packets(&mut client) {
                 Ok(()) => {}
                 Err(e) => {
-                    log::warn!("Renet failed sending: {e}")
+                    log::warn!("Renet failed sending: {}", e)
                 }
             };
         }
@@ -175,6 +161,7 @@ fn server(public_addr: SocketAddr) {
     let mut transport = NetcodeServerTransport::new(current_time, server_config, socket).unwrap();
 
     let mut usernames: HashMap<u64, String> = HashMap::new();
+    let mut received_messages = vec![];
     let mut last_updated = Instant::now();
 
     let (tx, rx) = mpsc::sync_channel(1);
@@ -200,6 +187,8 @@ fn server(public_addr: SocketAddr) {
         server.update(duration);
         transport.update(duration, &mut server).unwrap();
 
+        received_messages.clear();
+
         while let Some(event) = server.get_event() {
             match event {
                 ServerEvent::ClientConnected { client_id } => {
@@ -222,25 +211,14 @@ fn server(public_addr: SocketAddr) {
                 let username = usernames.get(&client_id).unwrap();
                 log::info!("Client {} ({}) sent text: {}", username, client_id, text);
 
-                log::info!("Echoing back {}", text);
-                server.send_message(
-                    client_id,
-                    DefaultChannel::Unreliable,
-                    format!("{}_{}", username, text).as_bytes().to_vec(),
-                );
+                let text = format!("{}: {}", username, text);
+                received_messages.push(text);
             }
-
-            // if packet_seq <= 200 && packet_seq % 10 == 0 {
-            //     let text = format!("{}_{}", SLICE_MESSAGE, packet_seq);
-            //     println!("Sending {}", text);
-            //     server.send_message(client_id, DefaultChannel::Unreliable, text.as_bytes().to_vec());
-            // }
-            // packet_seq += 1;
         }
 
-        // for text in received_messages.iter() {
-        //     server.broadcast_message(DefaultChannel::ReliableOrdered, text.as_bytes().to_vec());
-        // }
+        for text in received_messages.iter() {
+            server.broadcast_message(DefaultChannel::Unreliable, text.as_bytes().to_vec());
+        }
 
         transport.send_packets(&mut server);
         thread::sleep(Duration::from_millis(50));
@@ -350,4 +328,14 @@ impl SignalingResponse {
     pub fn new(sdp: String, client_id: u64) -> SignalingResponse {
         SignalingResponse { sdp, client_id }
     }
+}
+
+fn spawn_stdin_channel() -> Receiver<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    thread::spawn(move || loop {
+        let mut buffer = String::new();
+        std::io::stdin().read_line(&mut buffer).unwrap();
+        tx.send(buffer.trim_end().to_string()).unwrap();
+    });
+    rx
 }

@@ -234,11 +234,15 @@ impl NetcodeServerTransport {
     /// Send packets to connected clients.
     pub fn send_packets(&mut self, server: &mut RenetServer) {
         'clients: for client_id in server.clients_id() {
-            let packets = server.get_packets_to_send(client_id).unwrap();
-            for packet in packets {
-                match self.netcode_server.generate_payload_packet(client_id, &packet) {
-                    Ok((addr, payload)) => {
-                        if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, client_id) {
+            if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, client_id) {
+                if !str0m_client.rtc.is_alive() {
+                    continue 'clients;
+                }
+
+                let packets = server.get_packets_to_send(client_id).unwrap();
+                for packet in packets {
+                    match self.netcode_server.generate_payload_packet(client_id, &packet) {
+                        Ok((addr, payload)) => {
                             let mut channel = str0m_client
                                 .cid
                                 .and_then(|id| str0m_client.rtc.channel(id))
@@ -248,19 +252,19 @@ impl NetcodeServerTransport {
 
                             if let Err(err) = channel.write(true, payload) {
                                 log::error!("Failed to send packet to {addr}: {err}");
-                            }
-                        } else {
-                            log::error!("Failed to send packet to client {client_id} ({addr}): cannot find str0m client");
+                            }            
+                        }
+                        Err(e) => {
+                            log::error!("Failed to encrypt payload packet for client {client_id}: {e}");
                             continue 'clients;
-                        };
-                    }
-                    Err(e) => {
-                        log::error!("Failed to encrypt payload packet for client {client_id}: {e}");
-                        continue 'clients;
+                        }
                     }
                 }
-            }
-        }
+            } else {
+                log::error!("Failed to send packet, cannot find str0m client {}", client_id);
+                continue 'clients;
+            };
+        } 
     }
 
     pub fn spawn_new_client(&mut self, rx: &Receiver<(u64, Rtc)>) {

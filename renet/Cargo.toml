@@ -22,8 +22,7 @@ bytes = "1.1"
 log = "0.4.17"
 octets = "0.2"
 renetcode = { path = "../renetcode", version = "0.0.9", optional = true }
-str0m = { git = "https://github.com/biceneutron/str0m.git", branch = "test/add-log", optional = true }
-
+str0m = { git = "https://github.com/algesten/str0m.git", optional = true }
 
 [dev-dependencies]
 env_logger = "0.10.0"

@@ -79,7 +79,6 @@ pub struct Str0mClient {
     id: Str0mClientId,
     rtc: Rtc,
     cid: Option<ChannelId>,
-    dest: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -99,7 +98,6 @@ impl Str0mClient {
             id: Str0mClientId(client_id),
             rtc,
             cid: None,
-            dest: None,
         }
     }
 
@@ -158,16 +156,10 @@ impl Str0mClient {
                     log::info!("Data channel {:?} is closed", cid);
                     Str0mOutput::Noop
                 }
-                Event::ChannelOpen(cid, dest) => {
+                Event::ChannelOpen(cid, _) => {
                     log::info!("Data channel {:?} is open", cid);
 
-                    if let Ok(addr) = dest.parse() {
-                        self.cid = Some(cid);
-                        self.dest = Some(addr);
-                    } else {
-                        log::error!("Data channel is open but cannot parse address");
-                    }
-
+                    self.cid = Some(cid);
                     Str0mOutput::Noop
                 }
                 Event::ChannelData(data) => {

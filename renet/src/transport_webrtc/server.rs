@@ -144,18 +144,9 @@ impl NetcodeServerTransport {
                         return Str0mOutput::Timeout(Instant::now());
                     }
 
-                    // if let Some((_, destination)) = c.get_send_addr() {
-                    //     self.datachannel_mapping.entry(c.id).or_insert_with(|| destination);
-                    // }
-
-                    if let Some(destination) = c.dest {
-                        self.datachannel_mapping.entry(c.id).or_insert_with(|| destination);
-                    }
-
                     let output = c.poll_output(&self.socket);
                     match (output.clone(), self.datachannel_mapping.get(&c.id)) {
                         (Str0mOutput::Data(mut data), Some(source)) => {
-                            // let buf = &mut data.to_vec();
                             let server_result = self.netcode_server.process_packet(*source, &mut data);
                             handle_server_result(server_result, c, server);
                         }
@@ -167,7 +158,7 @@ impl NetcodeServerTransport {
                 .collect();
             let timeouts: Vec<_> = outputs.iter().filter_map(|p| p.as_timeout()).collect();
 
-            // We keep polling clients until all clients respond with a timeout.
+            // Keep polling clients until all clients respond with a timeout
             if outputs.len() > timeouts.len() {
                 continue;
             }
@@ -188,6 +179,7 @@ impl NetcodeServerTransport {
                         );
 
                         if let Some(client) = self.str0m_clients.iter_mut().find(|c| c.accepts(&input)) {
+                            self.datachannel_mapping.entry(client.id).or_insert_with(|| source);
                             client.handle_input(input);
                         } else {
                             log::warn!("No str0m client accepts the incoming packet: {:?}", input);

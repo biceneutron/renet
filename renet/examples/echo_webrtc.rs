@@ -234,7 +234,7 @@ async fn create_rtc(local_addr: SocketAddr) -> (Rtc, u64) {
     rtc.add_local_candidate(local_candidate);
 
     let mut api = rtc.sdp_api();
-    let _ = api.add_channel(local_addr.to_string());
+    let _ = api.add_channel("data".to_string());
     let (offer, pending) = api.apply().unwrap();
     let offer_string = offer.to_sdp_string();
 

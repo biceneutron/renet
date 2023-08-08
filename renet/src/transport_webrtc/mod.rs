@@ -11,7 +11,7 @@ pub use renetcode::{
     NETCODE_KEY_BYTES, NETCODE_USER_DATA_BYTES,
 };
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::UdpSocket;
 use std::ops::Deref;
 use std::time::Instant;
 
@@ -173,14 +173,6 @@ impl Str0mClient {
                 }
             },
         }
-    }
-
-    pub fn show_send_addr(&self) {
-        self.rtc.show_send_addr();
-    }
-
-    pub fn get_send_addr(&self) -> Option<(SocketAddr, SocketAddr)> {
-        self.rtc.get_send_addr()
     }
 }
 

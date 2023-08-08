@@ -3,7 +3,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, UdpSocket},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, SyncSender, Receiver, TryRecvError},
+        mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
     thread,
     time::{Duration, Instant, SystemTime},
@@ -176,7 +176,6 @@ fn server(public_addr: SocketAddr) {
         server.run();
     });
 
-    let mut packet_seq = 0;
     loop {
         let now = Instant::now();
         let duration = now - last_updated;

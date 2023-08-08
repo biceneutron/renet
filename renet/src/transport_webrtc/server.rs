@@ -117,7 +117,7 @@ impl NetcodeServerTransport {
             if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, client_id) {
                 handle_server_result(server_result, str0m_client, server);
             } else {
-                panic!("No corresponding str0m client");
+                log::error!("No corresponding str0m client");
             }
         }
     }
@@ -199,7 +199,7 @@ impl NetcodeServerTransport {
             if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, client_id) {
                 handle_server_result(server_result, str0m_client, server);
             } else {
-                panic!("No corresponding str0m client");
+                log::error!("No corresponding str0m client");
             }
         }
 
@@ -209,7 +209,7 @@ impl NetcodeServerTransport {
             if let Some(str0m_client) = find_str0m_client_by_id(&mut self.str0m_clients, disconnection_id) {
                 handle_server_result(server_result, str0m_client, server);
             } else {
-                panic!("No corresponding str0m client");
+                log::error!("No corresponding str0m client");
             }
         }
 
@@ -244,7 +244,7 @@ impl NetcodeServerTransport {
 
                             if let Err(err) = channel.write(true, payload) {
                                 log::error!("Failed to send packet to {addr}: {err}");
-                            }            
+                            }
                         }
                         Err(e) => {
                             log::error!("Failed to encrypt payload packet for client {client_id}: {e}");
@@ -256,7 +256,7 @@ impl NetcodeServerTransport {
                 log::error!("Failed to send packet, cannot find str0m client {}", client_id);
                 continue 'clients;
             };
-        } 
+        }
     }
 
     pub fn spawn_new_client(&mut self, rx: &Receiver<(u64, Rtc)>) {
@@ -267,7 +267,7 @@ impl NetcodeServerTransport {
                 self.str0m_clients.push(new_client);
             }
             Err(TryRecvError::Empty) => {}
-            _ => panic!("Receiver<Rtc> disconnected"),
+            _ => log::error!("Receiver<Rtc> disconnected"),
         }
     }
 

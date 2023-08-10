@@ -321,32 +321,3 @@ fn handle_server_result(server_result: ServerResult, client: &mut Str0mClient, r
         }
     }
 }
-
-// fn propagate(clients: &mut [Str0mClient], to_propagate: Vec<Propagated>) {
-//     for p in to_propagate {
-//         let Some(client_id) = p.client_id() else {
-//             // If the event doesn't have a client id, it can't be propagated,
-//             // (it's either a noop or a timeout).
-//             continue;
-//         };
-
-//         for client in &mut *clients {
-//             if client.id == client_id {
-//                 // Do not propagate to originating client.
-//                 continue;
-//             }
-
-//             match &p {
-//                 Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
-//                 Propagated::MediaData(_, data) => client.handle_media_data(client_id, data),
-//                 Propagated::KeyframeRequest(_, req, origin, mid_in) => {
-//                     // Only one origin client handles the keyframe request.
-//                     if *origin == client.id {
-//                         client.handle_keyframe_request(*req, *mid_in)
-//                     }
-//                 }
-//                 Propagated::Noop | Propagated::Timeout(_) => {}
-//             }
-//         }
-//     }
-// }

@@ -9,21 +9,55 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use renet::{
-    transport_webrtc::{
-        ClientAuthentication, NetcodeClientTransport, NetcodeServerTransport, ServerAuthentication, ServerConfig, Str0mClient,
-        NETCODE_USER_DATA_BYTES,
-    },
-    ConnectionConfig, DefaultChannel, RenetClient, RenetServer, ServerEvent,
-};
-
 use base64::{prelude::BASE64_STANDARD, Engine};
-use rand::Rng;
-use str0m::change::{SdpAnswer, SdpOffer};
-use str0m::{Candidate, Rtc};
+// use rand::Rng;
 
-#[tokio::main]
-async fn main() {
+use wasm_bindgen::prelude::*;
+cfg_if::cfg_if! {
+    if #[cfg(target_arch = "wasm32")] {
+        // wasm
+        use renet::{
+            transport_webrtc::{
+                ClientAuthentication, NetcodeClientTransport, RtcHandler,
+                NETCODE_USER_DATA_BYTES,
+            },
+            ConnectionConfig, DefaultChannel, RenetClient
+        };
+        use wasm_bindgen_futures::JsFuture;
+        use web_sys::{
+            MessageEvent, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelState, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcSdpType,
+            RtcSessionDescriptionInit,
+        };
+    } else {
+        // native
+        use renet::{
+            transport_webrtc::{
+                ClientAuthentication, NetcodeClientTransport, NetcodeServerTransport, RtcHandler, ServerAuthentication, ServerConfig, Str0mClient,
+                NETCODE_USER_DATA_BYTES,
+            },
+            ConnectionConfig, DefaultChannel, RenetClient, RenetServer, ServerEvent,
+        };
+        use str0m::change::{SdpAnswer, SdpOffer};
+        use str0m::{Candidate, Rtc};
+    }
+}
+
+// wasm
+// #[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console)]
+    fn log(s: &str);
+}
+
+macro_rules! console_log {
+    // Note that this is using the `log` function imported above during
+    // `bare_bones`
+    ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
+}
+
+#[wasm_bindgen]
+pub fn main() {
     println!("Usage: server [SERVER_PORT] or client [SERVER_PORT] [USER_NAME]");
     let args: Vec<String> = std::env::args().collect();
 
@@ -36,7 +70,7 @@ async fn main() {
         "client" => {
             let server_addr: SocketAddr = format!("127.0.0.1:{}", args[2]).parse().unwrap();
             let username = Username(args[3].clone());
-            client(server_addr, username).await;
+            client(server_addr, username);
         }
         _ => {
             println!("Invalid argument, first one must be \"client\" or \"server\".");
@@ -167,16 +201,25 @@ fn create_server_rtc(offer: String, addr: SocketAddr, tx: SyncSender<(u64, Rtc)>
     tx.send((client_id, rtc)).expect("to send Rtc instance");
 }
 
-async fn client(server_addr: SocketAddr, username: Username) {
+fn client(server_addr: SocketAddr, username: Username) {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
     let local_addr = Ipv4Addr::new(127, 0, 0, 1);
-    let udp_port = rand::thread_rng().gen_range(50000..=65535);
+    // let udp_port = rand::thread_rng().gen_range(50000..=65535);
+    let udp_port = 51234;
     let udp_socket_addr = SocketAddr::from((local_addr.octets(), udp_port));
     let socket = UdpSocket::bind(udp_socket_addr).unwrap();
 
     // webrtc
-    let (rtc, client_id) = create_client_rtc(udp_socket_addr).await;
+    //native
+    #[cfg(not(target_arch = "wasm32"))]
+    let (rtc_handler, client_id) = create_client_rtc(udp_socket_addr);
+
+    // wasm
+    #[cfg(target_arch = "wasm32")]
+    let (tx, rx) = mpsc::sync_channel(1);
+    #[cfg(target_arch = "wasm32")]
+    let (rtc_handler, client_id) = create_client_rtc(udp_socket_addr, tx);
 
     // renet
     let authentication = ClientAuthentication::Unsecure {
@@ -187,7 +230,7 @@ async fn client(server_addr: SocketAddr, username: Username) {
     };
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let mut client = RenetClient::new(ConnectionConfig::default());
-    let mut transport = NetcodeClientTransport::new(current_time, authentication, socket, Str0mClient::new(client_id, rtc)).unwrap();
+    let mut transport = NetcodeClientTransport::new(current_time, authentication, socket, rtc_handler).unwrap();
 
     let stdin_channel: Receiver<String> = spawn_stdin_channel();
     let mut last_updated = Instant::now();
@@ -198,7 +241,14 @@ async fn client(server_addr: SocketAddr, username: Username) {
         last_updated = now;
 
         client.update(duration);
+        #[cfg(not(target_arch = "wasm32"))]
         if let Err(e) = transport.update(duration, &mut client) {
+            log::warn!("Failed updating transport layer: {e}");
+            break;
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        if let Err(e) = transport.update(duration, &mut client, &rx) {
             log::warn!("Failed updating transport layer: {e}");
             break;
         };
@@ -232,7 +282,9 @@ async fn client(server_addr: SocketAddr, username: Username) {
     log::info!("Str0m is closed");
 }
 
-async fn create_client_rtc(local_addr: SocketAddr) -> (Rtc, u64) {
+// native
+#[cfg(not(target_arch = "wasm32"))]
+fn create_client_rtc(local_addr: SocketAddr) -> (RtcHandler, u64) {
     let mut rtc = Rtc::new();
     let local_candidate = match Candidate::host(local_addr) {
         Ok(c) => c,
@@ -274,7 +326,46 @@ async fn create_client_rtc(local_addr: SocketAddr) -> (Rtc, u64) {
         panic!("Str0m failed accepting answer SDP: {}", e);
     };
 
-    (rtc, client_id)
+    (RtcHandler::new(Str0mClient::new(client_id, rtc)), client_id)
+}
+
+// wasm
+#[cfg(target_arch = "wasm32")]
+fn create_client_rtc(local_addr: SocketAddr, tx: SyncSender<Vec<u8>>) -> (RtcHandler, u64) {
+    let peer_connection = match RtcPeerConnection::new() {
+        Ok(pc) => pc,
+        Err(e) => panic!("Failed creating peer connection: {:?}", e),
+    };
+    let data_channel = peer_connection.create_data_channel("data");
+
+    let onmessage_callback = Closure::wrap(Box::new(move |evt: MessageEvent| match evt.data().as_string() {
+        Some(data) => {
+            log::info!("on_message callback: received length: {}, data: {}", data.len(), data);
+            tx.send(data.into_bytes()).expect("to send Rtc instance");
+        }
+        None => {}
+    }) as Box<dyn FnMut(MessageEvent)>);
+    data_channel.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
+    onmessage_callback.forget();
+
+    // offer
+    let peer_connection_2 = peer_connection.clone();
+    let create_offer_func: Box<dyn FnMut(JsValue)> = Box::new(move |e: JsValue| {
+        let offer: RtcSessionDescriptionInit = e.into();
+        match offer.as_string() {
+            Some(o) => {
+                console_log!("\nPaste this SDP to the server terminal:");
+                console_log!("{}\n", BASE64_STANDARD.encode(o));
+            }
+            None => panic!("Offer SDP should be parsed to a String"),
+        }
+
+        // peer_connection_2.set_local_description(&offer).then(&peer_desc_callback);
+    });
+    let create_offer_callback = Closure::wrap(create_offer_func);
+    peer_connection.create_offer().then(&create_offer_callback);
+
+    (RtcHandler::new(peer_connection, data_channel), 0)
 }
 
 fn spawn_stdin_channel() -> Receiver<String> {

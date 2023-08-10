@@ -14,7 +14,7 @@ version = "0.0.13"
 bevy = ["dep:bevy_ecs"]
 default = ["transport"]
 transport = ["dep:renetcode"]
-transport_webrtc = ["dep:renetcode"] # needs to depend on str0m
+transport_webrtc = ["renetcode/wasm"] # needs to depend on str0m
 
 [dependencies]
 bevy_ecs = { version = "0.11", optional = true }
@@ -22,10 +22,34 @@ bytes = "1.1"
 log = "0.4.17"
 octets = "0.2"
 renetcode = { path = "../renetcode", version = "0.0.9", optional = true }
-str0m = { git = "https://github.com/algesten/str0m.git" } # should be optional
+cfg-if = "1.0.0"
+wasm-bindgen = "0.2.87" # should be optional (features = transport_webrtc, target_arch = wasm32)
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+str0m = { git = "https://github.com/algesten/str0m.git" } # should be optional (features = transport_webrtc, target_arch != wasm32)
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3" # should be optional (features = transport_webrtc, target_arch = wasm32)
+wasm-bindgen-futures = "0.4.24" # should be optional (features = transport_webrtc, target_arch = wasm32)
+
+# should be optional (features = transport_webrtc, target_arch = wasm32)
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3.22"
+features = [
+  "MessageEvent",
+  "RtcPeerConnection",
+  "RtcSignalingState",
+  "RtcSdpType",
+  "RtcSessionDescriptionInit",
+  "RtcPeerConnectionIceEvent",
+  "RtcIceCandidate",
+  "RtcDataChannel",
+  "RtcDataChannelEvent",
+  "RtcDataChannelState"
+]
+
 
 [dev-dependencies]
 env_logger = "0.10.0"
-tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread"] }
-rand = "0.8.5"
+# rand = "0.8.5"
 base64 = "0.21.2"

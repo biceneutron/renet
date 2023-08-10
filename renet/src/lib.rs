@@ -8,7 +8,7 @@ mod server;
 #[cfg(feature = "transport")]
 pub mod transport;
 
-// #[cfg(feature = "transport_webrtc")]
+#[cfg(feature = "transport_webrtc")]
 pub mod transport_webrtc;
 
 pub use channel::{ChannelConfig, DefaultChannel, SendType};

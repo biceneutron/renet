@@ -23,8 +23,9 @@ use std::convert::TryInto;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    MessageEvent, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelState, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcSdpType,
-    RtcSessionDescription, RtcSessionDescriptionInit,
+    Document, Element, HtmlCollection, HtmlElement, HtmlFormElement, HtmlInputElement, HtmlTextAreaElement, MessageEvent, RtcDataChannel,
+    RtcDataChannelEvent, RtcDataChannelState, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcSdpType, RtcSessionDescription,
+    RtcSessionDescriptionInit, Window,
 };
 
 // wasm
@@ -75,11 +76,14 @@ fn client(server_addr: SocketAddr, username: Username) {
     let current_time = Instant::now().duration_since(Instant { 0: 0 });
 
     let mut client = RenetClient::new(ConnectionConfig::default());
+    console_log!("DB_2");
     let mut transport = NetcodeClientTransport::new(current_time, authentication, rtc_handler).unwrap();
+    console_log!("DB_3");
 
-    let stdin_channel: Receiver<String> = spawn_stdin_channel();
+    // let stdin_channel: Receiver<String> = spawn_stdin_channel();
     let mut last_updated = Instant::now();
 
+    console_log!("Main loop starts!");
     // loop {
     //     let now = Instant::now();
     //     let duration = now - last_updated;
@@ -147,34 +151,59 @@ fn create_client_rtc(local_addr: SocketAddr, tx: SyncSender<Vec<u8>>) -> (RtcHan
     onmessage_callback.forget();
 
     // offer
-    console_log!("DB_2");
     let peer_connection_2 = peer_connection.clone();
-    console_log!("DB_3");
     let create_offer_func: Box<dyn FnMut(JsValue)> = Box::new(move |e: JsValue| {
-        console_log!("DB_5");
         let offer_init: RtcSessionDescriptionInit = e.into();
         let offer = RtcSessionDescription::new_with_description_init_dict(&offer_init);
         match offer {
             Ok(o) => {
                 console_log!("\nPaste this SDP to the server terminal:");
                 console_log!("{}\n", BASE64_STANDARD.encode(o.sdp()));
+
+                let window = web_sys::window().unwrap();
+                let document = window.document().unwrap();
+                let establish_connection = document.query_selector("#establish-connection").unwrap().unwrap();
+                let handler = Closure::wrap(Box::new(handle_submit) as Box<dyn Fn(_)>);
+                AsRef::<web_sys::EventTarget>::as_ref(&establish_connection)
+                    .add_event_listener_with_callback("submit", handler.as_ref().unchecked_ref());
+                handler.forget();
+
+                console_log!("DB_0");
+                // loop
+                // fetch_posts(&window);
             }
             Err(e) => {
                 // panic!("Offer SDP should be parsed to a String")
                 console_log!("panic! {:?}", e.as_string());
             }
         }
+        console_log!("DB_1");
 
         // peer_connection_2.set_local_description(&offer).then(&peer_desc_callback);
     });
     let create_offer_callback = Closure::wrap(create_offer_func);
     peer_connection.create_offer().then(&create_offer_callback);
 
-    console_log!("DB_4");
-
     create_offer_callback.forget();
 
     (RtcHandler::new(peer_connection, data_channel), 0)
+}
+
+fn handle_submit(event: web_sys::Event) {
+    event.prevent_default();
+    console_log!("In handle submit");
+    let form = event.target().unwrap().dyn_into::<HtmlFormElement>().unwrap();
+    let collection = form.elements();
+    let sdp_el = collection.named_item("sdp").unwrap().dyn_into::<HtmlTextAreaElement>().unwrap();
+    let client_id_el = collection.named_item("client-id").unwrap().dyn_into::<HtmlInputElement>().unwrap();
+
+    let sdp = sdp_el.value();
+    let client_id = client_id_el.value();
+    sdp_el.set_value("");
+    client_id_el.set_value("");
+
+    console_log!("sdp: {}", sdp);
+    console_log!("client_id: {}", client_id);
 }
 
 fn spawn_stdin_channel() -> Receiver<String> {

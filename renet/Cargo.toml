@@ -23,19 +23,27 @@ log = "0.4.17"
 octets = "0.2"
 renetcode = { path = "../renetcode", version = "0.0.9", optional = true }
 cfg-if = "1.0.0"
-wasm-bindgen = "0.2.87" # should be optional (features = transport_webrtc, target_arch = wasm32)
+wasm-bindgen = "0.2.87"                                                   # should be optional (features = transport_webrtc, target_arch = wasm32)
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 str0m = { git = "https://github.com/algesten/str0m.git" } # should be optional (features = transport_webrtc, target_arch != wasm32)
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3" # should be optional (features = transport_webrtc, target_arch = wasm32)
+js-sys = "0.3"                  # should be optional (features = transport_webrtc, target_arch = wasm32)
 wasm-bindgen-futures = "0.4.24" # should be optional (features = transport_webrtc, target_arch = wasm32)
 
 # should be optional (features = transport_webrtc, target_arch = wasm32)
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3.22"
 features = [
+  "Window",
+  "Document",
+  "Element",
+  "HtmlElement",
+  "HtmlFormElement",
+  "HtmlInputElement",
+  "HtmlTextAreaElement",
+  "HtmlCollection",
   "MessageEvent",
   "RtcPeerConnection",
   "RtcSignalingState",
@@ -45,7 +53,7 @@ features = [
   "RtcIceCandidate",
   "RtcDataChannel",
   "RtcDataChannelEvent",
-  "RtcDataChannelState"
+  "RtcDataChannelState",
 ]
 
 

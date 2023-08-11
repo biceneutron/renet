@@ -1,3 +1,5 @@
+cfg_if::cfg_if! {
+    if #[cfg(target_arch = "wasm32")] {
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr, UdpSocket},
@@ -19,17 +21,16 @@ use renet::{
     transport_webrtc::{ClientAuthentication, NetcodeClientTransport, RtcHandler, NETCODE_USER_DATA_BYTES},
     ConnectionConfig, DefaultChannel, RenetClient,
 };
+use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    Document, Element, HtmlCollection, HtmlElement, HtmlFormElement, HtmlInputElement, HtmlTextAreaElement, MessageEvent, RtcDataChannel,
-    RtcDataChannelEvent, RtcDataChannelState, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcSdpType, RtcSessionDescription,
-    RtcSessionDescriptionInit, Window,
+    Event, MessageEvent, ProgressEvent, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelState, RtcIceCandidate, RtcIceCandidateInit,
+    RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState, RtcSdpType, RtcSessionDescription, RtcSessionDescriptionInit,
+    XmlHttpRequest,
 };
 
-// wasm
-// #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
@@ -37,12 +38,11 @@ extern "C" {
 }
 
 macro_rules! console_log {
-    // Note that this is using the `log` function imported above during
-    // `bare_bones`
-    ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
-}
+            // Note that this is using the `log` function imported above during
+            // `bare_bones`
+            ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
+        }
 
-// #[wasm_bindgen]
 #[wasm_bindgen(start)]
 pub fn main() {
     console_log!("Started running!");
@@ -84,50 +84,44 @@ fn client(server_addr: SocketAddr, username: Username) {
     let mut last_updated = Instant::now();
 
     console_log!("Main loop starts!");
-    // loop {
-    //     let now = Instant::now();
-    //     let duration = now - last_updated;
-    //     last_updated = now;
+    let mut message_seq = 0;
+    loop {
+        let now = Instant::now();
+        let duration = now - last_updated;
+        last_updated = now;
 
-    //     client.update(duration);
-    //     #[cfg(not(target_arch = "wasm32"))]
-    //     if let Err(e) = transport.update(duration, &mut client) {
-    //         log::warn!("Failed updating transport layer: {e}");
-    //         break;
-    //     };
+        client.update(duration);
+        if let Err(e) = transport.update(duration, &mut client, &rx) {
+            log::warn!("Failed updating transport layer: {e}");
+            break;
+        };
 
-    //     #[cfg(target_arch = "wasm32")]
-    //     if let Err(e) = transport.update(duration, &mut client, &rx) {
-    //         log::warn!("Failed updating transport layer: {e}");
-    //         break;
-    //     };
+        console_log!("transport.is_connected() {}", transport.is_connected());
+        if transport.is_connected() {
+            console_log!("message seq = {}", message_seq);
+            if message_seq % 20 == 0 {
+                let message = format!("Client Message {}", message_seq);
+                client.send_message(DefaultChannel::Unreliable, message.as_bytes().to_vec());
+            }
+            message_seq += 1;
 
-    //     if transport.is_connected() {
-    //         match stdin_channel.try_recv() {
-    //             Ok(text) => {
-    //                 client.send_message(DefaultChannel::Unreliable, text.as_bytes().to_vec())
-    //             }
-    //             Err(TryRecvError::Empty) => {}
-    //             Err(TryRecvError::Disconnected) => panic!("Channel disconnected"),
-    //         }
+            while let Some(text) = client.receive_message(DefaultChannel::Unreliable) {
+                let text = String::from_utf8(text.into()).unwrap();
+                log::info!("Received user data: {}", text);
+            }
+        }
 
-    //         while let Some(text) = client.receive_message(DefaultChannel::Unreliable) {
-    //             let text = String::from_utf8(text.into()).unwrap();
-    //             log::info!("Received user data: {}", text);
-    //         }
-    //     }
+        if transport.is_data_channel_open() {
+            match transport.send_packets(&mut client) {
+                Ok(()) => {}
+                Err(e) => {
+                    log::warn!("Renet failed sending: {}", e)
+                }
+            };
+        }
 
-    //     if transport.is_data_channel_open() {
-    //         match transport.send_packets(&mut client) {
-    //             Ok(()) => {}
-    //             Err(e) => {
-    //                 log::warn!("Renet failed sending: {}", e)
-    //             }
-    //         };
-    //     }
-
-    //     thread::sleep(Duration::from_millis(50));
-    // }
+        // thread::sleep(Duration::from_millis(50));
+    }
 
     // transport.close_rtc();
     log::info!("Str0m is closed");
@@ -140,9 +134,22 @@ fn create_client_rtc(local_addr: SocketAddr, tx: SyncSender<Vec<u8>>) -> (RtcHan
     };
     let data_channel = peer_connection.create_data_channel("data");
 
+    // on_connectionstatechange callback
+    let peer_connection_1 = peer_connection.clone();
+    let onconnectionstatechange_callback = Closure::wrap(Box::new(move |evt: Event| {
+        // Some(data) => {
+        //     console_log!("Connection State: {:?}", data);
+        // }
+        // None => {}
+        console_log!("Connection State: {:?}", peer_connection_1.connection_state());
+    }) as Box<dyn FnMut(Event)>);
+    peer_connection.set_onconnectionstatechange(Some(onconnectionstatechange_callback.as_ref().unchecked_ref()));
+    onconnectionstatechange_callback.forget();
+
+    // on_message callback
     let onmessage_callback = Closure::wrap(Box::new(move |evt: MessageEvent| match evt.data().as_string() {
         Some(data) => {
-            log::info!("on_message callback: received length: {}, data: {}", data.len(), data);
+            console_log!("on_message callback: received length: {}, data: {}", data.len(), data);
             tx.send(data.into_bytes()).expect("to send Rtc instance");
         }
         None => {}
@@ -153,33 +160,79 @@ fn create_client_rtc(local_addr: SocketAddr, tx: SyncSender<Vec<u8>>) -> (RtcHan
     // offer
     let peer_connection_2 = peer_connection.clone();
     let create_offer_func: Box<dyn FnMut(JsValue)> = Box::new(move |e: JsValue| {
-        let offer_init: RtcSessionDescriptionInit = e.into();
-        let offer = RtcSessionDescription::new_with_description_init_dict(&offer_init);
-        match offer {
-            Ok(o) => {
-                console_log!("\nPaste this SDP to the server terminal:");
-                console_log!("{}\n", BASE64_STANDARD.encode(o.sdp()));
+        let offer = e.into();
+        let peer_connection_3 = peer_connection_2.clone();
+        let signaling_offer_func: Box<dyn FnMut(JsValue)> = Box::new(move |_: JsValue| {
+            let request = XmlHttpRequest::new().expect("can't create new XmlHttpRequest");
 
-                let window = web_sys::window().unwrap();
-                let document = window.document().unwrap();
-                let establish_connection = document.query_selector("#establish-connection").unwrap().unwrap();
-                let handler = Closure::wrap(Box::new(handle_submit) as Box<dyn Fn(_)>);
-                AsRef::<web_sys::EventTarget>::as_ref(&establish_connection)
-                    .add_event_listener_with_callback("submit", handler.as_ref().unchecked_ref());
-                handler.forget();
+            request
+                .open("POST", &"http://127.0.0.1:8080")
+                .unwrap_or_else(|err| log::error!("can't POST to server session url. {:?}", err));
 
-                console_log!("DB_0");
-                // loop
-                // fetch_posts(&window);
-            }
-            Err(e) => {
-                // panic!("Offer SDP should be parsed to a String")
-                console_log!("panic! {:?}", e.as_string());
-            }
-        }
+            let peer_connection_4 = peer_connection_3.clone();
+            let request_2 = request.clone();
+            let request_func: Box<dyn FnMut(ProgressEvent)> = Box::new(move |_: ProgressEvent| {
+                if request_2.status().unwrap() == 200 {
+                    let response_string = request_2.response_text().unwrap().unwrap();
+                    let signaling_response: SignalingResponse = serde_json::from_str(&response_string).unwrap();
+                    let answer = signaling_response.sdp.clone();
+
+                    console_log!("Received answer: {}", answer);
+
+                    // #TODO parse the candiadate from answer SDP and set it to peer connection
+
+                    // let setting_candidate_func: Box<dyn FnMut(JsValue)> = Box::new(move |e: JsValue| {
+                    //     let mut candidate_init_dict: RtcIceCandidateInit = RtcIceCandidateInit::new(candidate_str);
+                    //     candidate_init_dict.sdp_m_line_index(Some(session_response.candidate.sdp_m_line_index));
+                    //     candidate_init_dict.sdp_mid(Some(session_response.candidate.sdp_mid.as_str()));
+                    //     let candidate: RtcIceCandidate = RtcIceCandidate::new(&candidate_init_dict).unwrap();
+                    // });
+
+                    // let setting_candidate_callback = Closure::wrap(setting_candidate_func);
+                    let mut sdp_init_dict = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
+                    sdp_init_dict.sdp(&answer);
+                    peer_connection_4.set_remote_description(&sdp_init_dict);
+                    // .then(&setting_candidate_callback);
+                    // setting_candidate_callback.forget();
+                }
+            });
+
+            let request_callback = Closure::wrap(request_func);
+            request.set_onload(Some(request_callback.as_ref().unchecked_ref()));
+            request_callback.forget();
+
+            request
+                .send_with_opt_str(Some(peer_connection_3.local_description().unwrap().sdp().as_str()))
+                .unwrap_or_else(|err| log::error!("WebSys, can't sent request str. Original Error: {:?}", err));
+        });
+        // let offer = RtcSessionDescription::new_with_description_init_dict(&offer_init);
+        // match offer {
+        //     Ok(o) => {
+        //         console_log!("\nPaste this SDP to the server terminal:");
+        //         console_log!("{}\n", BASE64_STANDARD.encode(o.sdp()));
+
+        //         // let window = web_sys::window().unwrap();
+        //         // let document = window.document().unwrap();
+        //         // let establish_connection = document.query_selector("#establish-connection").unwrap().unwrap();
+        //         // let handler = Closure::wrap(Box::new(handle_submit) as Box<dyn Fn(_)>);
+        //         // AsRef::<web_sys::EventTarget>::as_ref(&establish_connection)
+        //         //     .add_event_listener_with_callback("submit", handler.as_ref().unchecked_ref());
+        //         // handler.forget();
+
+        //         console_log!("DB_0");
+        //         // loop
+        //         // fetch_posts(&window);
+        //     }
+        //     Err(e) => {
+        //         // panic!("Offer SDP should be parsed to a String")
+        //         console_log!("panic! {:?}", e.as_string());
+        //     }
+        // }
         console_log!("DB_1");
+        let signaling_offer_callback = Closure::wrap(signaling_offer_func);
 
-        // peer_connection_2.set_local_description(&offer).then(&peer_desc_callback);
+        peer_connection_2.set_local_description(&offer).then(&signaling_offer_callback);
+        signaling_offer_callback.forget();
     });
     let create_offer_callback = Closure::wrap(create_offer_func);
     peer_connection.create_offer().then(&create_offer_callback);
@@ -189,40 +242,28 @@ fn create_client_rtc(local_addr: SocketAddr, tx: SyncSender<Vec<u8>>) -> (RtcHan
     (RtcHandler::new(peer_connection, data_channel), 0)
 }
 
-fn handle_submit(event: web_sys::Event) {
-    event.prevent_default();
-    console_log!("In handle submit");
-    let form = event.target().unwrap().dyn_into::<HtmlFormElement>().unwrap();
-    let collection = form.elements();
-    let sdp_el = collection.named_item("sdp").unwrap().dyn_into::<HtmlTextAreaElement>().unwrap();
-    let client_id_el = collection.named_item("client-id").unwrap().dyn_into::<HtmlInputElement>().unwrap();
-
-    let sdp = sdp_el.value();
-    let client_id = client_id_el.value();
-    sdp_el.set_value("");
-    client_id_el.set_value("");
-
-    console_log!("sdp: {}", sdp);
-    console_log!("client_id: {}", client_id);
-}
-
-fn spawn_stdin_channel() -> Receiver<String> {
-    let (tx, rx) = mpsc::channel::<String>();
-    thread::spawn(move || loop {
-        console_log!("DB_1");
-        let mut buffer = String::new();
-        std::io::stdin().read_line(&mut buffer).unwrap();
-        tx.send(buffer.trim_end().to_string()).unwrap();
-    });
-    rx
-}
+// fn spawn_stdin_channel() -> Receiver<String> {
+//     let (tx, rx) = mpsc::channel::<String>();
+//     thread::spawn(move || loop {
+//         console_log!("DB_1");
+//         let mut buffer = String::new();
+//         std::io::stdin().read_line(&mut buffer).unwrap();
+//         tx.send(buffer.trim_end().to_string()).unwrap();
+//     });
+//     rx
+// }
 
 fn decode(encoded: String) -> Result<Vec<u8>, base64::DecodeError> {
     let decoded = BASE64_STANDARD.decode(encoded)?;
     Ok(decoded)
 }
 
-// Helper struct to pass an username in the user data
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct SignalingResponse {
+    pub sdp: String,
+    pub client_id: u64,
+}
+
 struct Username(String);
 
 impl Username {
@@ -251,9 +292,9 @@ impl Username {
 // time
 
 #[wasm_bindgen(inline_js = r#"
-        export function performance_now() {
-        return performance.now();
-        }"#)]
+                export function performance_now() {
+                return performance.now();
+                }"#)]
 extern "C" {
     fn performance_now() -> f64;
 }
@@ -311,5 +352,7 @@ impl AddAssign<Duration> for Instant {
 impl SubAssign<Duration> for Instant {
     fn sub_assign(&mut self, other: Duration) {
         *self = *self - other;
+    }
+}
     }
 }
